@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bettersims"
-version = "0.2.0"
+version = "0.3.0"
 description = "Find and fix broken, duplicate and conflicting Sims 4 mods"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = []
+dependencies = ["customtkinter==5.2.2"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pyinstaller>=6"]

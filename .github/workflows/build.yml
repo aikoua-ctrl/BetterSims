@@ -30,8 +30,8 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
       # Windowed app for double-clicking, plus a console build for the command line.
-      - run: pyinstaller --onefile --windowed --name BetterSims --collect-submodules bettersims run_bettersims.py
-      - run: pyinstaller --onefile --name bettersims-cli --collect-submodules bettersims run_bettersims.py
+      - run: pyinstaller --onefile --windowed --name BetterSims --collect-submodules bettersims --collect-data customtkinter run_bettersims.py
+      - run: pyinstaller --onefile --name bettersims-cli --collect-submodules bettersims --collect-data customtkinter run_bettersims.py
       - uses: actions/upload-artifact@v4
         with:
           name: BetterSims-windows

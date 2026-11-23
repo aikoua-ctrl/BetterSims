@@ -59,12 +59,12 @@ Close The Sims 4 before applying fixes.
 
 ## Building from source
 
-Requires Python 3.10+ (no other dependencies).
+Requires Python 3.10+. The desktop app uses [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) for its dark theme; the scanner itself has no dependencies.
 
 ```
 pip install -e ".[dev]"
 pytest
-pyinstaller --onefile --windowed --name BetterSims --collect-submodules bettersims run_bettersims.py
+pyinstaller --onefile --windowed --name BetterSims --collect-submodules bettersims --collect-data customtkinter run_bettersims.py
 ```
 
 GitHub Actions runs the tests on Windows and Linux and builds `BetterSims.exe` on every push (see the run's artifacts).
