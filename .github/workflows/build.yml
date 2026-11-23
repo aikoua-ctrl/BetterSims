@@ -1,0 +1,40 @@
+name: test-and-build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  windows-exe:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      # Windowed app for double-clicking, plus a console build for the command line.
+      - run: pyinstaller --onefile --windowed --name BetterSims --collect-submodules bettersims run_bettersims.py
+      - run: pyinstaller --onefile --name bettersims-cli --collect-submodules bettersims run_bettersims.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BetterSims-windows
+          path: |
+            dist/BetterSims.exe
+            dist/bettersims-cli.exe

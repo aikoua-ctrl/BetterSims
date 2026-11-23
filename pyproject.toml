@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bettersims"
+version = "0.1.0"
+description = "Find and fix broken, duplicate and conflicting Sims 4 mods"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6"]
+
+[project.scripts]
+bettersims = "bettersims.cli:main"
+
+[tool.setuptools]
+packages = ["bettersims", "bettersims.rules"]
