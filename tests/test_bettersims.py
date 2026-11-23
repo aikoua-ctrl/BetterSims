@@ -348,7 +348,6 @@ def test_cli_auto_demo(sims, capsys):
 ])
 def test_game_runner_watching(sims, monkeypatch, scenario, expect_broken, expect_failed):
     import threading
-    import time as _time
     clock = {"t": 1000.0}
     monkeypatch.setattr(autobisect.time, "time", lambda: clock["t"])
     monkeypatch.setattr(autobisect.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
