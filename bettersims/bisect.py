@@ -52,7 +52,7 @@ def units(mods_dir: Path, inside: Path | None = None) -> dict[str, list[str]]:
     base = inside or mods_dir
     out: dict[str, list[str]] = {}
     loose: dict[str, list[str]] = defaultdict(list)
-    for p in sorted(base.iterdir()):
+    for p in sorted(base.iterdir(), key=lambda q: q.name.lower()):  # same order on Windows and Linux
         if p.name.lower() in JUNK_DIRS:
             continue
         if p.is_dir():
@@ -67,14 +67,14 @@ def units(mods_dir: Path, inside: Path | None = None) -> dict[str, list[str]]:
 
 
 def _disable(mods: Path, state: dict, labels: list[str]) -> None:
-    for label in labels:
-        for rel in state["units"][label]:
-            f = mods / rel
-            off = f.with_name(f.name + "OFF")
-            if not f.exists() or off.exists():
-                continue  # already off, or a stray OFF copy we must not overwrite
-            f.rename(off)
-            state["renamed"].append(str(off))
+    rels = [rel for label in labels for rel in state["units"][label]] + state.get("parked", [])
+    for rel in rels:
+        f = mods / rel
+        off = f.with_name(f.name + "OFF")
+        if not f.exists() or off.exists():
+            continue  # already off, or a stray OFF copy we must not overwrite
+        f.rename(off)
+        state["renamed"].append(str(off))
 
 
 def _enable_all(state: dict) -> list[str]:
@@ -123,6 +123,11 @@ def answer(sims_dir: Path, still_broken: bool) -> str:
         raise SystemExit("No 50/50 search running. Start one with 'bettersims bisect start'.")
     # Still broken with half off -> the culprit is among the ones left ON, else among the OFF ones.
     state["suspects"] = state["testing_on"] if still_broken else state["testing_off"]
+    if still_broken:
+        # The problem happened without the OFF half, so they aren't needed to cause it: keep them off from
+        # now on. Otherwise a second bad mod among them would make every later round look "broken" and
+        # send the search to an innocent mod.
+        state.setdefault("parked", []).extend(rel for lbl in state["testing_off"] for rel in state["units"][lbl])
     problems = _enable_all(state)
     mods = sims_dir / "Mods"
     if len(state["suspects"]) == 1:

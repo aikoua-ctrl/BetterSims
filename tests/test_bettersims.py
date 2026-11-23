@@ -393,3 +393,23 @@ def test_explanations_render_for_demo(sims):
         assert e.options and e.options[-1][0] == "Leave it"
         if f.fixable:
             assert e.fix and e.options[0][0] == "Fix"
+
+
+@pytest.mark.parametrize("pair", [
+    ("CrashyCareers.ts4script", "MoreTraits.ts4script"),
+    ("CrashyCareers.ts4script", "NotForSims.ts4script"),
+    ("BetterBuild_v1.3.package", "partymod.ts4script"),
+    ("empty.package", "SimmerX_LongHair.package"),
+])
+def test_two_culprits_always_lands_on_a_real_one(sims, pair):
+    # Whatever order the folders sort in (it differs between Windows and Linux), the search
+    # must end on one of the actual bad mods, never an innocent one.
+    class Two:
+        def run(self, sims_dir, stop):
+            names = {p.name for p in (sims_dir / "Mods").rglob("*")}
+            return autobisect.Outcome(bool(set(pair) & names), "x")
+    before = snapshot(sims)
+    res = autobisect.run_auto(sims, Two(), say=lambda *_: None)
+    assert any(Path(f).name in pair for f in res.files), res
+    assert "more than one mod" in res.message
+    assert snapshot(sims) == before
