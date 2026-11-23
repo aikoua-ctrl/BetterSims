@@ -412,3 +412,68 @@ def test_two_culprits_always_lands_on_a_real_one(sims, pair):
     assert any(Path(f).name in pair for f in res.files), res
     assert "more than one mod" in res.message
     assert snapshot(sims) == before
+
+
+# ---- auto repair ------------------------------------------------------------
+from bettersims import autorepair  # noqa: E402
+
+
+def _mods_on(sims):
+    return {p.name for p in (sims / "Mods").rglob("*") if p.suffix.lower() in (".package", ".ts4script")}
+
+
+def test_auto_repair_fixes_files_and_removes_every_bad_mod(sims):
+    phases = []
+    res = autorepair.run_repair(sims, autobisect.DemoRunner(("crashy", "notforsims"), seconds=0),
+                                say=lambda *_: None, phase=phases.append)
+    assert res.clean and res.fixed > 0
+    assert sorted(res.removed) == ["CrashyCareers.ts4script", "NotForSims.ts4script"]
+    on = _mods_on(sims)
+    assert "CrashyCareers.ts4script" not in on and "NotForSims.ts4script" not in on
+    assert "FasterAging.package" in on  # innocent mods stay
+    assert not list((sims / "Mods").rglob("*OFF")) or {p.name for p in (sims / "Mods").rglob("*OFF")} == {"TurnedOff.packageOFF"}
+    assert bisect.load_state(sims) is None
+    assert phases[0] == "scan" and phases[-1] == "done" and "search" in phases
+    # one undo puts everything back
+    fixer.undo(sims, res.session, log=lambda *_: None)
+    assert "CrashyCareers.ts4script" in _mods_on(sims)
+
+
+def test_auto_repair_clean_game_only_fixes_files(sims):
+    res = autorepair.run_repair(sims, autobisect.DemoRunner("nothing-matches", seconds=0), say=lambda *_: None)
+    assert res.clean and res.removed == [] and res.fixed > 0
+
+
+def test_auto_repair_problem_without_mods_is_not_a_mod(sims):
+    class AlwaysBroken:
+        def run(self, sims_dir, stop):
+            return autobisect.Outcome(True, "crash")
+    res = autorepair.run_repair(sims, AlwaysBroken(), say=lambda *_: None)
+    assert not res.clean and res.removed == [] and "isn't caused by a mod" in res.message
+    assert "CrashyCareers.ts4script" in _mods_on(sims) and not any(p.name.endswith("OFF") and "Crashy" in p.name
+                                                            for p in (sims / "Mods").rglob("*"))
+
+
+def test_auto_repair_stops_at_removal_limit(sims):
+    res = autorepair.run_repair(sims, autobisect.DemoRunner(("crashy", "notforsims"), seconds=0),
+                                say=lambda *_: None, max_removals=1)
+    assert not res.clean and len(res.removed) == 1 and "Stopped here" in res.message
+    assert bisect.load_state(sims) is None
+
+
+def test_auto_repair_stop_button(sims):
+    import threading
+    stop = threading.Event()
+
+    class StopMidway:
+        n = 0
+
+        def run(self, sims_dir, stop_ev):
+            self.n += 1
+            if self.n == 3:
+                stop.set()
+            return autobisect.Outcome("CrashyCareers.ts4script" in _mods_on(sims_dir), "x")
+    res = autorepair.run_repair(sims, StopMidway(), stop=stop, say=lambda *_: None)
+    assert res.stopped and bisect.load_state(sims) is None
+    assert "CrashyCareers.ts4script" in _mods_on(sims)
+    assert not [p for p in (sims / "Mods").rglob("*OFF") if p.name != "TurnedOff.packageOFF"]

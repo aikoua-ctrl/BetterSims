@@ -191,7 +191,7 @@ class Fixer:
 
     def apply(self, findings: list[Finding], log=print) -> FixResult:
         res = FixResult(self.journal.session)
-        self.journal.data["findings"] = [f.title for f in findings]
+        self.journal.data.setdefault("findings", []).extend(f.title for f in findings)
         self.journal.save()
         for f in findings:
             for a in f.actions:

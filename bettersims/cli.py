@@ -152,20 +152,43 @@ def cmd_quarantine(a) -> int:
     return 0
 
 
+def _runner(a):
+    from . import autobisect
+
+    if a.demo:
+        return autobisect.DemoRunner(("crashy", "notforsims"))
+    exe = Path(a.game_exe) if a.game_exe else autobisect.find_game_exe()
+    if not exe or not exe.is_file():
+        print("Couldn't find TS4_x64.exe. Pass it with --game-exe "
+              '"C:\\Program Files\\EA Games\\The Sims 4\\Game\\Bin\\TS4_x64.exe"')
+        return None
+    return autobisect.GameRunner(exe, minutes=a.minutes, match=a.match or "")
+
+
+def cmd_repair(a) -> int:
+    from . import autorepair
+
+    sims = resolve_sims_dir(a.sims_dir)
+    runner = _runner(a)
+    if runner is None:
+        return 1
+    res = autorepair.run_repair(sims, runner, tries=a.tries, max_removals=a.max_removals,
+                                clear_cache=not a.keep_cache)
+    print(f"\n{'REPAIRED' if res.clean else 'NOT FULLY REPAIRED'}: {res.fixed} file change(s), "
+          f"{len(res.removed)} mod(s) removed" + (f" ({', '.join(res.removed)})" if res.removed else ""))
+    if res.session:
+        print(f"Undo everything with: bettersims undo {res.session}")
+    return 0 if res.clean else 1
+
+
 def cmd_bisect(a) -> int:
     sims = resolve_sims_dir(a.sims_dir)
     if a.step == "auto":
         from . import autobisect
 
-        if a.demo:
-            runner = autobisect.DemoRunner()
-        else:
-            exe = Path(a.game_exe) if a.game_exe else autobisect.find_game_exe()
-            if not exe or not exe.is_file():
-                print("Couldn't find TS4_x64.exe. Pass it with --game-exe "
-                      '"C:\\Program Files\\EA Games\\The Sims 4\\Game\\Bin\\TS4_x64.exe"')
-                return 1
-            runner = autobisect.GameRunner(exe, minutes=a.minutes, match=a.match or "")
+        runner = autobisect.DemoRunner() if a.demo else _runner(a)
+        if runner is None:
+            return 1
         res = autobisect.run_auto(sims, runner, tries=a.tries)
         print("\n" + (f"Bad mod: {res.found}\n" if res.found else "") + res.message)
         if res.found:
@@ -230,11 +253,17 @@ def build_parser() -> argparse.ArgumentParser:
     b = add("bisect", cmd_bisect, "Find a bad mod by turning half off at a time")
     b.add_argument("step", choices=["start", "broken", "fixed", "reset", "status", "auto"],
                    help="'auto' launches the game by itself each round and watches for crashes and new error logs")
-    b.add_argument("--game-exe", help="Path to TS4_x64.exe (found automatically if left out)")
-    b.add_argument("--minutes", type=float, default=5, help="auto: how long to watch the game each round (default 5)")
-    b.add_argument("--match", help="auto: only count error logs containing this text")
-    b.add_argument("--tries", type=int, default=1, help="auto: launches per round, for problems that don't happen every time")
-    b.add_argument("--demo", action="store_true", help="auto: simulate the game (for trying it on the demo folder)")
+    def game_args(sp):
+        sp.add_argument("--game-exe", help="Path to TS4_x64.exe (found automatically if left out)")
+        sp.add_argument("--minutes", type=float, default=5, help="how long to watch the game each launch (default 5)")
+        sp.add_argument("--match", help="only count error logs containing this text")
+        sp.add_argument("--tries", type=int, default=1, help="launches per test, for problems that don't happen every time")
+        sp.add_argument("--demo", action="store_true", help="simulate the game (for trying it on the demo folder)")
+    game_args(b)
+    r = add("repair", cmd_repair, "Auto Repair: fix files, then test the game and remove bad mods until it runs clean")
+    game_args(r)
+    r.add_argument("--max-removals", type=int, default=5, help="stop after removing this many mods (default 5)")
+    r.add_argument("--keep-cache", action="store_true", help="don't clear the game's cache files")
     d = sub.add_parser("demo", help="Create a fake broken Sims 4 folder to try BetterSims on")
     d.add_argument("path")
     d.set_defaults(fn=cmd_demo)

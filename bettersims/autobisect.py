@@ -152,6 +152,41 @@ class GameRunner:
 
 
 # ---- the automatic search ------------------------------------------------------
+def tester(sims_dir: Path, runner: Runner, stop: threading.Event, say: Callable[[str], None],
+           tries: int = 1) -> Callable[[str], bool]:
+    """Returns test(label) -> True when the problem showed up in one of `tries` launches."""
+    def test(label: str) -> bool:
+        for t in range(tries):
+            say(f"{label}: launching the game" + (f" (try {t + 1}/{tries})" if tries > 1 else "") + "...")
+            o = runner.run(sims_dir, stop)
+            if o.failed:
+                raise SystemExit(f"Stopped: {o.reason}. All your mods are turned back on.")
+            say(f"{label}: {'PROBLEM' if o.broken else 'fine'} ({o.reason})")
+            if o.broken:
+                return True
+            if stop.is_set():
+                break
+        return False
+    return test
+
+
+def with_all_off(sims_dir: Path, fn: Callable[[], bool]) -> bool:
+    """Runs fn() with every mod turned off (renamed to ...OFF), then turns them all back on."""
+    renamed = []
+    try:
+        for f in bisect._mod_files(sims_dir / "Mods"):
+            off = f.with_name(f.name + "OFF")
+            if not off.exists():
+                f.rename(off)
+                renamed.append(f)
+        return fn()
+    finally:
+        for f in renamed:
+            off = f.with_name(f.name + "OFF")
+            if off.exists() and not f.exists():
+                off.rename(f)
+
+
 @dataclass
 class AutoResult:
     found: str | None
@@ -183,20 +218,23 @@ def _confirm(sims_dir: Path, files: list[str], test: Callable[[str], bool]) -> s
 
 
 class DemoRunner:
-    """Pretend game for the demo folder: 'crashes' while any mod file matching `culprit` is on."""
+    """Pretend game for the demo folder: 'crashes' while any mod file matching a culprit name is on."""
 
-    def __init__(self, culprit: str = "crashy", seconds: float = 0.6):
-        self.culprit, self.seconds = culprit.lower(), seconds
+    def __init__(self, culprit: str | tuple[str, ...] = "crashy", seconds: float = 0.6):
+        self.culprits = (culprit,) if isinstance(culprit, str) else tuple(culprit)
+        self.culprits = tuple(c.lower() for c in self.culprits)
+        self.seconds = seconds
 
     def run(self, sims_dir: Path, stop: threading.Event) -> Outcome:
         time.sleep(self.seconds)
-        on = [p for p in (sims_dir / "Mods").rglob("*") if p.is_file() and self.culprit in p.name.lower()
-              and p.suffix.lower() in (".package", ".ts4script")]
+        on = [p for p in (sims_dir / "Mods").rglob("*") if p.is_file() and p.suffix.lower() in (".package", ".ts4script")
+              and any(c in p.name.lower() for c in self.culprits)]
         return Outcome(True, f"simulated crash ({on[0].name} is on)") if on else Outcome(False, "simulated: no errors")
 
 
 def run_auto(sims_dir: Path, runner: Runner, stop: threading.Event | None = None,
-             say: Callable[[str], None] = print, tries: int = 1) -> AutoResult:
+             say: Callable[[str], None] = print, tries: int = 1, skip_baseline: bool = False,
+             confirm: bool = True) -> AutoResult:
     """Runs the whole search. Always leaves every mod turned back on, even when stopped or on error."""
     stop = stop or threading.Event()
     sims_dir = Path(sims_dir)
@@ -205,21 +243,10 @@ def run_auto(sims_dir: Path, runner: Runner, stop: threading.Event | None = None
     if game_running():
         raise SystemExit("Close The Sims 4 first.")
 
-    def test(label: str) -> bool:
-        for t in range(tries):
-            say(f"{label}: launching the game" + (f" (try {t + 1}/{tries})" if tries > 1 else "") + "...")
-            o = runner.run(sims_dir, stop)
-            if o.failed:
-                raise SystemExit(f"Stopped: {o.reason}. All your mods are turned back on.")
-            say(f"{label}: {'PROBLEM' if o.broken else 'fine'} ({o.reason})")
-            if o.broken:
-                return True
-            if stop.is_set():
-                break
-        return False
+    test = tester(sims_dir, runner, stop, say, tries)
 
     # Baseline: does the problem show up automatically with everything on?
-    if not test("Check with all mods on"):
+    if not skip_baseline and not test("Check with all mods on"):
         msg = ("With all your mods on, the game started without a crash or a new error log, so there's "
                "nothing for the automatic search to track. If the problem only shows up in-game (after "
                "loading a save), use the manual 50/50 finder instead.")
@@ -239,7 +266,8 @@ def run_auto(sims_dir: Path, runner: Runner, stop: threading.Event | None = None
                 if msg.startswith("Found it") and found_file.exists():
                     data = json.loads(found_file.read_text())
                     say(msg.splitlines()[0])
-                    return AutoResult(data["label"], data["files"], _confirm(sims_dir, data["files"], test), rounds)
+                    msg = _confirm(sims_dir, data["files"], test) if confirm else "Found the mod that breaks the game."
+                    return AutoResult(data["label"], data["files"], msg, rounds)
                 return AutoResult(None, [], msg, rounds)
             say(msg.splitlines()[0])
         return AutoResult(None, [], "Stopped. All your mods are turned back on.", rounds)

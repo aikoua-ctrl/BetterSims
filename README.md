@@ -36,6 +36,20 @@ Switch the 50/50 finder to **Automatic** and BetterSims runs the rounds itself: 
 - Stop works at any time, and every mod is always turned back on at the end.
 - Command line: `bettersims bisect auto [--minutes 5] [--match TEXT] [--tries 2] [--game-exe PATH]`, or `--demo` to simulate the game on the demo folder.
 
+### Auto Repair (all-in-one)
+
+The **Auto Repair** page does everything in one go and keeps going until the game runs clean:
+
+1. Scans your Mods folder and applies every safe fix (plus clearing the game's cache, which you can switch off).
+2. Starts the game and watches it. If there's no crash and no new error log, it's done.
+3. The first time the game has a problem, it runs once more with every mod off. If the problem is still there, it isn't a mod, and it stops and tells you so instead of removing innocent mods.
+4. Runs the automatic 50/50 search to find the mod that breaks the game, and moves it to quarantine.
+5. Goes back to step 2, until the game runs clean or it has removed the most mods you allowed (3, 5 or 10).
+
+Everything it does goes into one fix session, so a single **Undo** in History puts every file back. It has the same limit as the automatic 50/50: it sees crashes and errors while the game loads, not problems that only show up once you're playing.
+
+Command line: `bettersims repair [--max-removals 5] [--minutes 5] [--tries 2] [--keep-cache] [--game-exe PATH]`, or `--demo` to simulate the game on the demo folder.
+
 ### What gets fixed automatically and what waits for you
 
 Pre-ticked (safe): folder depth, zipped mods, broken and empty files, exact duplicates, old versions of the same mod, two versions of the same script mod, Options.ini, Resource.cfg, misplaced/junk/program files.
@@ -62,6 +76,8 @@ bettersims history                     # list fix sessions
 bettersims quarantine "SomeMod.package"           # remove a mod safely
 bettersims purge --all --yes           # permanently delete quarantined files
 bettersims bisect start | broken | fixed | reset  # 50/50 helper
+bettersims bisect auto                 # automatic 50/50 (launches the game itself)
+bettersims repair                      # Auto Repair: fix, test, remove bad mods, repeat
 bettersims demo "C:\Temp\Demo Sims 4"  # build a broken demo folder
 ```
 
