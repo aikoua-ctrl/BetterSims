@@ -254,3 +254,121 @@ def test_options_ini_bytes_preserved(sims):
     _, findings = run_scan(sims)
     fixer.Fixer(sims).apply([f for f in findings if f.rule == "options-ini"], log=lambda *_: None)
     assert ini.read_bytes() == b"[options]\nname = Caf\xe9\nmodsdisabled = 0\n"
+
+
+# ---- automatic 50/50 -------------------------------------------------------
+from bettersims import autobisect  # noqa: E402
+
+
+def test_auto_bisect_finds_culprit_and_restores(sims):
+    before = snapshot(sims)
+    lines = []
+    res = autobisect.run_auto(sims, autobisect.DemoRunner(seconds=0), say=lines.append)
+    assert res.found == "CrashyCareers.ts4script"
+    assert "Confirmed" in res.message
+    assert snapshot(sims) == before
+    assert any("Check with all mods on" in line for line in lines)
+
+
+def test_auto_bisect_stops_when_baseline_is_clean(sims):
+    before = snapshot(sims)
+    res = autobisect.run_auto(sims, autobisect.DemoRunner(culprit="nothing-matches", seconds=0), say=lambda *_: None)
+    assert res.found is None and "manual" in res.message
+    assert snapshot(sims) == before
+
+
+def test_auto_bisect_two_culprits_reports_honestly(sims):
+    # Broken while EITHER of two mods is on: one is found, and the double-check says more are involved.
+    class Two:
+        def run(self, sims_dir, stop):
+            names = {p.name for p in (sims_dir / "Mods").rglob("*")}
+            bad = {"CrashyCareers.ts4script", "MoreTraits.ts4script"} & names
+            return autobisect.Outcome(bool(bad), "x")
+    before = snapshot(sims)
+    res = autobisect.run_auto(sims, Two(), say=lambda *_: None)
+    assert res.found in ("CrashyCareers.ts4script", "MoreTraits.ts4script")
+    assert "more than one mod" in res.message
+    assert snapshot(sims) == before
+
+
+def test_auto_bisect_failed_launch_aborts_and_restores(sims):
+    calls = []
+
+    class Flaky:
+        def run(self, sims_dir, stop):
+            calls.append(1)
+            if len(calls) == 1:
+                return autobisect.Outcome(True, "baseline broken")
+            return autobisect.Outcome(False, "game didn't start", failed=True)
+    before = snapshot(sims)
+    with pytest.raises(SystemExit):
+        autobisect.run_auto(sims, Flaky(), say=lambda *_: None)
+    assert snapshot(sims) == before and bisect.load_state(sims) is None
+
+
+def test_auto_bisect_stop_button(sims):
+    import threading
+    stop = threading.Event()
+
+    class StopAfterTwo:
+        n = 0
+
+        def run(self, sims_dir, stop_ev):
+            self.n += 1
+            if self.n == 2:
+                stop.set()
+            return autobisect.Outcome(True, "x")
+    before = snapshot(sims)
+    res = autobisect.run_auto(sims, StopAfterTwo(), stop=stop, say=lambda *_: None)
+    assert res.found is None and "Stopped" in res.message
+    assert snapshot(sims) == before
+
+
+def test_new_error_log_detection(sims):
+    before = autobisect.log_snapshot(sims)
+    assert autobisect.new_errors(sims, before) == []
+    import os, time
+    log = sims / "lastException_demo.txt"
+    t = time.time() + 5
+    os.utime(log, (t, t))
+    assert autobisect.new_errors(sims, before) == [log]
+    assert autobisect.new_errors(sims, before, match="career_track") == [log]
+    assert autobisect.new_errors(sims, before, match="nope") == []
+    (sims / "lastUIException_1.txt").write_text("new")
+    assert len(autobisect.new_errors(sims, before)) == 2
+
+
+def test_cli_auto_demo(sims, capsys):
+    assert main(["bisect", "auto", "--demo", "--sims-dir", str(sims)]) == 0
+    assert "Bad mod: CrashyCareers.ts4script" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("scenario,expect_broken,expect_failed", [
+    ("crash", True, False), ("errorlog", True, False), ("clean", False, False), ("nostart", False, True),
+])
+def test_game_runner_watching(sims, monkeypatch, scenario, expect_broken, expect_failed):
+    import threading
+    import time as _time
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(autobisect.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(autobisect.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(autobisect.subprocess, "Popen", lambda *a, **k: None)
+    monkeypatch.setattr(autobisect.subprocess, "run", lambda *a, **k: None)
+    state = {"running": False, "polls": 0}
+
+    def running():
+        state["polls"] += 1
+        if scenario == "nostart":
+            return False
+        if state["polls"] == 2:
+            state["running"] = True
+        if scenario == "crash" and state["polls"] > 6:
+            state["running"] = False
+        if scenario == "errorlog" and state["polls"] == 5:
+            (sims / "lastException_new.txt").write_text("boom")
+        return state["running"]
+
+    monkeypatch.setattr(autobisect, "game_running", running)
+    r = autobisect.GameRunner(Path("TS4_x64.exe"), minutes=1, startup_minutes=1, log=lambda *_: None)
+    o = r.run(sims, threading.Event())
+    assert (o.broken, o.failed) == (expect_broken, expect_failed), o.reason

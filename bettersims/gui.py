@@ -195,17 +195,21 @@ class App(ctk.CTk):
         def run():
             try:
                 result = work()
-            except Exception as e:  # noqa: BLE001
+            except (Exception, SystemExit) as e:  # noqa: BLE001 - SystemExit carries plain-English stop reasons
                 self.events.put((self._failed, (e,)))
                 return
             self.events.put((done, (result,)))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _failed(self, e: Exception) -> None:
+    def _failed(self, e: BaseException) -> None:
         self.busy = False
+        if hasattr(self, "auto_start"):
+            self.auto_start.configure(state="normal")
+            self.auto_stop.configure(state="disabled")
+            self.auto_status.configure(text="Stopped")
         self._set_scanning(False)
-        self.toast(f"Something went wrong: {e}", "error")
+        self.toast(str(e) if isinstance(e, SystemExit) else f"Something went wrong: {e}", "error", 7000)
 
     def confirm(self, title: str, message: str, ok: str, danger: bool = False) -> bool:
         d = Confirm(self, title, message, ok, danger)
@@ -288,6 +292,9 @@ class App(ctk.CTk):
             self.refresh_history()
         if key == "bisect":
             self.refresh_bisect()
+            d = Path(self.dir) if self.dir else None
+            if d and d.is_dir() and bisect.load_state(d) and not (self.auto_stop_event and not self.auto_stop_event.is_set()):
+                self._bis_mode("Manual")
 
     def browse(self) -> None:
         d = filedialog.askdirectory(title="Select your 'The Sims 4' folder")
@@ -632,12 +639,38 @@ class App(ctk.CTk):
     def _page_bisect(self) -> None:
         pg = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         self.pages["bisect"] = pg
-        ctk.CTkLabel(pg, text="50/50 finder", font=self.f(28, "bold"), text_color=TEXT).pack(anchor="w", padx=32,
-                                                                                            pady=(28, 0))
-        ctk.CTkLabel(pg, text="When the game breaks and nothing points at a mod, this finds it by elimination.",
-                     font=self.f(13), text_color=MUTED).pack(anchor="w", padx=32)
-        steps = ctk.CTkFrame(pg, fg_color="transparent")
-        steps.pack(fill="x", padx=26, pady=20)
+        head = ctk.CTkFrame(pg, fg_color="transparent")
+        head.pack(fill="x", padx=32, pady=(28, 0))
+        head.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(head, text="50/50 finder", font=self.f(28, "bold"), text_color=TEXT).grid(row=0, column=0,
+                                                                                              sticky="w")
+        ctk.CTkLabel(head, text="When the game breaks and nothing points at a mod, this finds it by elimination.",
+                     font=self.f(13), text_color=MUTED).grid(row=1, column=0, sticky="w")
+        self.bis_mode = ctk.CTkSegmentedButton(
+            head, values=["Automatic", "Manual"], command=self._bis_mode, height=36, font=self.f(13),
+            selected_color=VIOLET, selected_hover_color=VIOLET_HOVER, unselected_color=CARD,
+            unselected_hover_color=CARD_HOVER, fg_color=CARD, text_color=TEXT, corner_radius=10)
+        self.bis_mode.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.bis_body = ctk.CTkScrollableFrame(pg, fg_color="transparent", scrollbar_button_color=RAISED)
+        self.bis_body.pack(fill="both", expand=True, padx=8, pady=(12, 8))
+        self._manual_panel()
+        self._auto_panel()
+        self.bis_mode.set("Automatic")
+        self._bis_mode("Automatic")
+
+    def _bis_mode(self, mode: str) -> None:
+        self.bis_mode.set(mode)
+        if mode == "Automatic":
+            self.manual_panel.pack_forget()
+            self.auto_panel.pack(fill="x")
+        else:
+            self.auto_panel.pack_forget()
+            self.manual_panel.pack(fill="x")
+
+    def _manual_panel(self) -> None:
+        mp = self.manual_panel = ctk.CTkFrame(self.bis_body, fg_color="transparent")
+        steps = ctk.CTkFrame(mp, fg_color="transparent")
+        steps.pack(fill="x", padx=12, pady=(4, 12))
         for i, (t, s) in enumerate((("Half off", "BetterSims turns half of your mods off."),
                                     ("You test", "Start the game and check for the problem."),
                                     ("Tell it", "Still broken, or gone? It narrows it down."))):
@@ -649,9 +682,8 @@ class App(ctk.CTk):
             ctk.CTkLabel(c, text=t, font=self.f(15, "bold"), text_color=TEXT).pack(anchor="w", padx=16)
             ctk.CTkLabel(c, text=s, font=self.f(12), text_color=MUTED, wraplength=230, justify="left").pack(
                 anchor="w", padx=16, pady=(2, 16))
-
-        self.bis_card = ctk.CTkFrame(pg, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER)
-        self.bis_card.pack(fill="x", padx=32, pady=6)
+        self.bis_card = ctk.CTkFrame(mp, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER)
+        self.bis_card.pack(fill="x", padx=18, pady=6)
         self.bis_title = ctk.CTkLabel(self.bis_card, text="", font=self.f(20, "bold"), text_color=TEXT, anchor="w")
         self.bis_title.pack(fill="x", padx=24, pady=(22, 4))
         self.bis_text = ctk.CTkLabel(self.bis_card, text="", font=self.f(13), text_color=MUTED, anchor="w",
@@ -661,6 +693,171 @@ class App(ctk.CTk):
                                           fg_color=RAISED)
         self.bis_btns = ctk.CTkFrame(self.bis_card, fg_color="transparent")
         self.bis_btns.pack(fill="x", padx=20, pady=(16, 20))
+
+    def _auto_panel(self) -> None:
+        from . import autobisect
+
+        ap = self.auto_panel = ctk.CTkFrame(self.bis_body, fg_color="transparent")
+        card = ctk.CTkFrame(ap, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER)
+        card.pack(fill="x", padx=18, pady=(4, 8))
+        card.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(card, text="Let BetterSims test for you", font=self.f(20, "bold"), text_color=TEXT,
+                     anchor="w").grid(row=0, column=0, columnspan=3, sticky="w", padx=24, pady=(22, 2))
+        ctk.CTkLabel(card, text="Each round it turns half the suspects off, starts The Sims 4 by itself, and watches "
+                     "for a crash or a new error log. Then it closes the game and goes again until one mod is left. "
+                     "About 5 to 8 minutes per round, so roughly an hour for 1,000 mods. Leave the PC alone meanwhile.",
+                     font=self.f(13), text_color=MUTED, wraplength=840, justify="left", anchor="w").grid(
+            row=1, column=0, columnspan=3, sticky="w", padx=24)
+        note = ctk.CTkFrame(card, fg_color="#251d47", corner_radius=10)
+        note.grid(row=2, column=0, columnspan=3, sticky="ew", padx=24, pady=(12, 8))
+        ctk.CTkLabel(note, text="It catches crashes and errors while the game loads. It can't see problems that only "
+                     "show up after you load a save and play (broken interactions, invisible CC, glitches). For "
+                     "those, use Manual.", font=self.f(12), text_color="#cfc4ff", wraplength=820, justify="left",
+                     anchor="w").pack(fill="x", padx=14, pady=10)
+
+        def label(row, text):
+            ctk.CTkLabel(card, text=text, font=self.f(13), text_color=MUTED, anchor="w").grid(
+                row=row, column=0, sticky="w", padx=(24, 16), pady=7)
+
+        self.game_exe = autobisect.find_game_exe()
+        label(3, "The Sims 4 game")
+        self.exe_label = ctk.CTkLabel(card, text=str(self.game_exe) if self.game_exe else "Not found yet",
+                                      font=self.f(13), text_color=TEXT if self.game_exe else FAINT, anchor="w")
+        self.exe_label.grid(row=3, column=1, sticky="w")
+        ghost_button(card, "Find TS4_x64.exe...", self._pick_exe, height=32, width=160).grid(row=3, column=2,
+                                                                                             padx=24, sticky="e")
+        label(4, "Watch each round for")
+        self.auto_minutes = ctk.CTkSegmentedButton(
+            card, values=["3 min", "5 min", "10 min"], height=32, font=self.f(12), selected_color=RAISED,
+            selected_hover_color=RAISED, unselected_color=BG, unselected_hover_color=CARD_HOVER, fg_color=BG,
+            text_color=TEXT, corner_radius=8)
+        self.auto_minutes.set("5 min")
+        self.auto_minutes.grid(row=4, column=1, sticky="w")
+        label(5, "Launches per round")
+        self.auto_tries = ctk.CTkSegmentedButton(
+            card, values=["1", "2", "3"], height=32, font=self.f(12), selected_color=RAISED,
+            selected_hover_color=RAISED, unselected_color=BG, unselected_hover_color=CARD_HOVER, fg_color=BG,
+            text_color=TEXT, corner_radius=8)
+        self.auto_tries.set("1")
+        self.auto_tries.grid(row=5, column=1, sticky="w")
+        ctk.CTkLabel(card, text="Use 2 or 3 if the problem doesn't happen every time", font=self.f(11),
+                     text_color=FAINT).grid(row=5, column=1, sticky="w", padx=(150, 0))
+        label(6, "Only count errors mentioning")
+        self.auto_match = ctk.CTkEntry(card, placeholder_text="optional, e.g. a word from your error",
+                                       width=320, height=32, fg_color=BG, border_color=BORDER, text_color=TEXT,
+                                       corner_radius=8, font=self.f(12))
+        self.auto_match.grid(row=6, column=1, sticky="w")
+        self.auto_sim = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(card, text="Simulate the game (try it on the demo folder without the game)",
+                        variable=self.auto_sim, font=self.f(12), text_color=MUTED, fg_color=VIOLET,
+                        hover_color=VIOLET_HOVER, border_color=FAINT, checkbox_width=20, checkbox_height=20,
+                        corner_radius=6).grid(row=7, column=0, columnspan=3, sticky="w", padx=24, pady=(8, 4))
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.grid(row=8, column=0, columnspan=3, sticky="ew", padx=20, pady=(12, 22))
+        self.auto_start = ctk.CTkButton(row, text="\u25B6  Start automatic search", command=self.start_auto,
+                                        fg_color=VIOLET, hover_color=VIOLET_HOVER, text_color="white",
+                                        corner_radius=10, height=40, width=230, font=self.f(14, "bold"))
+        self.auto_start.pack(side="left", padx=4)
+        self.auto_stop = danger_button(row, "Stop", self.stop_auto, width=100, height=40, state="disabled")
+        self.auto_stop.pack(side="left", padx=8)
+
+        live = ctk.CTkFrame(ap, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER)
+        live.pack(fill="x", padx=18, pady=8)
+        top = ctk.CTkFrame(live, fg_color="transparent")
+        top.pack(fill="x", padx=24, pady=(18, 6))
+        self.auto_status = ctk.CTkLabel(top, text="Not running", font=self.f(16, "bold"), text_color=TEXT)
+        self.auto_status.pack(side="left")
+        self.auto_bar = ctk.CTkProgressBar(live, height=8, corner_radius=4, progress_color=VIOLET, fg_color=RAISED)
+        self.auto_bar.set(0)
+        self.auto_bar.pack(fill="x", padx=24, pady=(4, 10))
+        self.auto_log = ctk.CTkTextbox(live, height=170, fg_color=BG, text_color=MUTED, corner_radius=10,
+                                       font=ctk.CTkFont("Consolas", 12), border_width=0)
+        self.auto_log.pack(fill="x", padx=24, pady=(0, 12))
+        self.auto_log.configure(state="disabled")
+        self.auto_result = ctk.CTkFrame(live, fg_color="transparent")
+        self.auto_result.pack(fill="x", padx=20, pady=(0, 16))
+        self.auto_stop_event: threading.Event | None = None
+
+    def _pick_exe(self) -> None:
+        f = filedialog.askopenfilename(title="Find TS4_x64.exe (in The Sims 4\\Game\\Bin)",
+                                       filetypes=[("The Sims 4", "TS4*.exe"), ("Programs", "*.exe")])
+        if f:
+            self.game_exe = Path(f)
+            self.exe_label.configure(text=f, text_color=TEXT)
+
+    def _auto_say(self, text: str) -> None:
+        self.auto_log.configure(state="normal")
+        self.auto_log.insert("end", time.strftime("%H:%M:%S  ") + text + "\n")
+        self.auto_log.see("end")
+        self.auto_log.configure(state="disabled")
+        if text.startswith("Round") and "suspects" in text:
+            self.auto_status.configure(text=text.split(":")[0])
+            d = Path(self.dir)
+            st = bisect.load_state(d)
+            if st:
+                total = max(2, len(st["units"]))
+                self.auto_bar.set(min(0.95, 1 - len(st["suspects"]) / total + 0.05))
+
+    def start_auto(self) -> None:
+        from . import autobisect
+
+        d = self.require_dir()
+        if not d:
+            return
+        if self.auto_sim.get():
+            runner = autobisect.DemoRunner(seconds=1.0)
+        else:
+            if not self.game_exe or not Path(self.game_exe).is_file():
+                self.toast("Point BetterSims at TS4_x64.exe first (The Sims 4\\Game\\Bin).", "warn")
+                return
+            minutes = float(self.auto_minutes.get().split()[0])
+            runner = autobisect.GameRunner(Path(self.game_exe), minutes=minutes, match=self.auto_match.get().strip(),
+                                           log=lambda m: self.events.put((self._auto_say, (m,))))
+        if game_running():
+            self.toast("Close The Sims 4 first. BetterSims will start it for each round.", "warn")
+            return
+        if not self.auto_sim.get() and not self.confirm(
+                "Start the automatic search?", "BetterSims will start and close The Sims 4 by itself several times. "
+                "Don't use the game while it runs. Your mods are only renamed, and all of them are turned back on "
+                "at the end, even if you press Stop.", "Start"):
+            return
+        for w in self.auto_result.winfo_children():
+            w.destroy()
+        self.auto_log.configure(state="normal")
+        self.auto_log.delete("1.0", "end")
+        self.auto_log.configure(state="disabled")
+        self.auto_bar.set(0.02)
+        self.auto_status.configure(text="Running...")
+        self.auto_start.configure(state="disabled")
+        self.auto_stop.configure(state="normal")
+        self.auto_stop_event = stop = threading.Event()
+        tries = int(self.auto_tries.get())
+        self._background(
+            lambda: autobisect.run_auto(d, runner, stop=stop, tries=tries,
+                                        say=lambda m: self.events.put((self._auto_say, (m,)))),
+            self._auto_done)
+
+    def stop_auto(self) -> None:
+        if self.auto_stop_event:
+            self.auto_stop_event.set()
+            self.auto_status.configure(text="Stopping after this launch...")
+            self.auto_stop.configure(state="disabled")
+
+    def _auto_done(self, res) -> None:
+        self.busy = False
+        self.auto_start.configure(state="normal")
+        self.auto_stop.configure(state="disabled")
+        self._auto_say(res.message)
+        if res.found:
+            self.auto_bar.set(1)
+            self.auto_status.configure(text=f"Found it: {res.found}")
+            files = [Path(self.dir) / "Mods" / f for f in res.files]
+            danger_button(self.auto_result, "Remove this mod", lambda: self.remove_files([f for f in files if f.exists()]),
+                          width=170, height=40).pack(side="left", padx=4)
+            self.toast(f"Found the bad mod: {res.found}")
+        else:
+            self.auto_bar.set(0)
+            self.auto_status.configure(text="Finished without a culprit")
 
     def refresh_bisect(self, message: str | None = None) -> None:
         for w in self.bis_btns.winfo_children():

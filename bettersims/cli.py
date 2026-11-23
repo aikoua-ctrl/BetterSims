@@ -144,6 +144,23 @@ def cmd_quarantine(a) -> int:
 
 def cmd_bisect(a) -> int:
     sims = resolve_sims_dir(a.sims_dir)
+    if a.step == "auto":
+        from . import autobisect
+
+        if a.demo:
+            runner = autobisect.DemoRunner()
+        else:
+            exe = Path(a.game_exe) if a.game_exe else autobisect.find_game_exe()
+            if not exe or not exe.is_file():
+                print("Couldn't find TS4_x64.exe. Pass it with --game-exe "
+                      '"C:\\Program Files\\EA Games\\The Sims 4\\Game\\Bin\\TS4_x64.exe"')
+                return 1
+            runner = autobisect.GameRunner(exe, minutes=a.minutes, match=a.match or "")
+        res = autobisect.run_auto(sims, runner, tries=a.tries)
+        print("\n" + (f"Bad mod: {res.found}\n" if res.found else "") + res.message)
+        if res.found:
+            print("Remove it safely with: bettersims quarantine " + " ".join(f'"{f}"' for f in res.files))
+        return 0 if res.found else 1
     if a.step == "start":
         print(bisect.start(sims))
     elif a.step in ("broken", "fixed"):
@@ -201,7 +218,13 @@ def build_parser() -> argparse.ArgumentParser:
     q = add("quarantine", cmd_quarantine, "Remove specific mods safely (into quarantine)")
     q.add_argument("paths", nargs="+", help="Paths, or names relative to Mods")
     b = add("bisect", cmd_bisect, "Find a bad mod by turning half off at a time")
-    b.add_argument("step", choices=["start", "broken", "fixed", "reset", "status"])
+    b.add_argument("step", choices=["start", "broken", "fixed", "reset", "status", "auto"],
+                   help="'auto' launches the game by itself each round and watches for crashes and new error logs")
+    b.add_argument("--game-exe", help="Path to TS4_x64.exe (found automatically if left out)")
+    b.add_argument("--minutes", type=float, default=5, help="auto: how long to watch the game each round (default 5)")
+    b.add_argument("--match", help="auto: only count error logs containing this text")
+    b.add_argument("--tries", type=int, default=1, help="auto: launches per round, for problems that don't happen every time")
+    b.add_argument("--demo", action="store_true", help="auto: simulate the game (for trying it on the demo folder)")
     d = sub.add_parser("demo", help="Create a fake broken Sims 4 folder to try BetterSims on")
     d.add_argument("path")
     d.set_defaults(fn=cmd_demo)

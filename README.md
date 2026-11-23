@@ -26,6 +26,16 @@ A Windows app that scans your Sims 4 Mods folder, finds everything that breaks m
 
 When nothing points at a specific mod, the **50/50 helper** finds it for you: it turns half your mods off (renaming to `.packageOFF`, same as Sims 4 Mod Manager), you test the game and click "still broken" or "problem gone", and a few rounds later it names the bad mod and turns everything back on. A mod's `.package` and `.ts4script` are always switched together, and when the search narrows down to one big folder (like a "CC" folder) it carries on inside it.
 
+### Automatic 50/50
+
+Switch the 50/50 finder to **Automatic** and BetterSims runs the rounds itself: it turns half the suspects off, starts The Sims 4, and watches for a crash or a new error log (lastException, Better Exceptions, MCCC). If neither happens within the time you pick (3, 5 or 10 minutes), that half is clean. It closes the game and continues until one mod is left, then double-checks by running once with only that mod off.
+
+- It first runs with all mods on. If the problem doesn't show up automatically there, it stops instead of guessing.
+- "Only count errors mentioning" narrows it to your specific error. "Launches per round" helps with problems that don't happen every time.
+- It can only see crashes and errors while the game loads. Problems that need you to load a save and play (broken interactions, invisible CC, visual glitches) still need the manual mode.
+- Stop works at any time, and every mod is always turned back on at the end.
+- Command line: `bettersims bisect auto [--minutes 5] [--match TEXT] [--tries 2] [--game-exe PATH]`, or `--demo` to simulate the game on the demo folder.
+
 ### What gets fixed automatically and what waits for you
 
 Pre-ticked (safe): folder depth, zipped mods, broken and empty files, exact duplicates, old versions of the same mod, two versions of the same script mod, Options.ini, Resource.cfg, misplaced/junk/program files.
