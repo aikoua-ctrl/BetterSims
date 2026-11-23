@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import fnmatch
 import json
-from pathlib import Path
 
 from ..model import Action, Finding, Severity
 from ..scanner import Inventory
@@ -19,7 +18,7 @@ def check_known_issues(inv: Inventory) -> list[Finding]:
     if not path.is_file():
         return []
     try:
-        entries = json.loads(path.read_text())
+        entries = json.loads(path.read_text(encoding="utf-8-sig"))
     except (json.JSONDecodeError, OSError):
         return [Finding("known-issues", Severity.WARNING, "known_issues.json can't be read",
                         "Fix the JSON syntax in BetterSims/known_issues.json.", [path])]

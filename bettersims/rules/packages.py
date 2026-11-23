@@ -16,7 +16,9 @@ def check_corrupt_packages(inv: Inventory) -> list[Finding]:
         if f.size == 0:
             continue  # reported by empty-file rule
         pkg = inv.package(f)
-        if isinstance(pkg, Exception):
+        if isinstance(pkg, OSError):
+            out.append(unreadable(f, pkg))
+        elif isinstance(pkg, Exception):
             out.append(
                 Finding(
                     "corrupt-package",
@@ -42,6 +44,25 @@ def check_corrupt_packages(inv: Inventory) -> list[Finding]:
                 )
             )
     return out
+
+
+def unreadable(f: FileEntry, err: OSError) -> Finding:
+    """A file we couldn't open is not necessarily broken, so it is never auto-removed."""
+    hint = ("Its full path is very long; Windows may refuse paths over 260 characters. Move it to a "
+            "shorter folder." if len(str(f.path)) > 240 else
+            "It may be open in another program, or blocked by antivirus or OneDrive syncing.")
+    return Finding(
+        "unreadable",
+        Severity.WARNING,
+        f"Can't open {f.path.name}",
+        f"BetterSims couldn't read this file ({err.strerror or err}). {hint}",
+        [f.path],
+    )
+
+
+def names_title(files: list[FileEntry]) -> str:
+    names = [f.path.name for f in files]
+    return " vs ".join(names) if len(names) <= 3 else f"{' vs '.join(names[:2])} and {len(names) - 2} more"
 
 
 def _keeper(files: list[FileEntry]) -> FileEntry:
@@ -85,6 +106,7 @@ _VERSION_RE = re.compile(
     r"""(
         [\s_\-.]*\(\d+\)$            |   # "mod (1)"
         [\s_\-.]*-?\s*copy(\s*\d+)?$ |   # "mod - Copy"
+        [\s_\-.]+(old|new|backup|bak|latest|updated)$ |   # "mod_old"
         [\s_\-.]*v?\d+([._]\d+)+[a-z]?$ |  # "mod_v1.2.3", "mod 2024.6"
         [\s_\-.]*v\d+[a-z]?$          |   # "mod_v3"
         [\s_\-.]*(19|20)\d{2}[\-_.]?\d{2}([\-_.]?\d{2})?$  # dates
@@ -207,7 +229,7 @@ def check_resource_conflicts(inv: Inventory) -> list[Finding]:
             Finding(
                 "conflict",
                 Severity.WARNING if serious else Severity.INFO,
-                f"Conflict: {' vs '.join(f.path.name for f in files)}",
+                f"Conflict: {names_title(files)}",
                 f"These packages change the same {total} game resource(s) ({summary}) in different ways, "
                 "so only one version wins and the other mod is partly broken. Sometimes this is on "
                 "purpose (a patch or add-on for another mod). Check the creators' pages if unsure. "

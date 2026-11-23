@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import __version__, bisect, demo, fixer, report
 from .model import Action, Finding, Severity
-from .paths import app_dir, resolve_sims_dir
+from .paths import app_dir, game_running, resolve_sims_dir
 from .rules import run_rules
 from .scanner import scan
 
@@ -81,6 +81,9 @@ def cmd_fix(a) -> int:
                   "--only <id> or use --all.")
         print("\nRun again with --apply to do it. Close The Sims 4 first.")
         return 0
+    if game_running() and not a.force:
+        print("The Sims 4 is running. Close the game first (it locks mod files), or add --force.")
+        return 1
     res = fixer.Fixer(sims).apply(chosen)
     print(f"\nDone: {len(res.done)} change(s), {len(res.skipped)} skipped, {len(res.errors)} error(s).")
     if res.done:
@@ -187,6 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--apply", action="store_true", help="Actually make the changes")
     f.add_argument("--all", action="store_true", help="Include fixes that normally need you to choose")
     f.add_argument("--only", nargs="+", metavar="ID", help="Only these finding ids or rule names")
+    f.add_argument("--force", action="store_true", help="Apply even if the game seems to be running")
     u = add("undo", cmd_undo, "Undo a fix session (the last one by default)")
     u.add_argument("session", nargs="?")
     add("history", cmd_history, "List fix sessions")
@@ -205,7 +209,18 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _safe_console() -> None:
+    """Windows consoles default to an old code page; mod names with accents or emoji must not crash us."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _safe_console()
     argv = sys.argv[1:] if argv is None else argv
     if not argv:
         # Double-clicked exe: open the window.

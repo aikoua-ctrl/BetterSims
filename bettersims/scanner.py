@@ -41,7 +41,7 @@ class Inventory:
         if entry.path not in self._packages:
             try:
                 self._packages[entry.path] = dbpf.read_package(entry.path)
-            except (dbpf.DbpfError, OSError) as e:
+            except Exception as e:  # noqa: BLE001 - any unreadable package is "broken", never a crash
                 self._packages[entry.path] = e
         return self._packages[entry.path]
 
@@ -49,7 +49,7 @@ class Inventory:
         if entry.path not in self._scripts:
             try:
                 self._scripts[entry.path] = _read_script(entry.path)
-            except (zipfile.BadZipFile, OSError, ValueError) as e:
+            except Exception as e:  # noqa: BLE001 - bad zip, unsupported compression, encryption...
                 self._scripts[entry.path] = e
         return self._scripts[entry.path]
 

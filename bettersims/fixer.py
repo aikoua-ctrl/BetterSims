@@ -123,7 +123,7 @@ class Fixer:
         if not _inside(a.src, self.sims_dir):
             raise FixError(f"refusing to touch a file outside the Sims 4 folder: {a.src}")
         if a.kind == "write":
-            new = (a.content or "").encode()
+            new = (a.content or "").encode("utf-8", "surrogateescape")
             if a.src.exists():
                 if a.src.read_bytes() == new:
                     return "already correct"
@@ -198,7 +198,9 @@ class Fixer:
                 desc = a.describe(self.sims_dir)
                 try:
                     outcome = self.apply_action(a)
-                except (OSError, FixError, zipfile.BadZipFile) as e:
+                except Exception as e:  # noqa: BLE001 - report and carry on with the other fixes
+                    if isinstance(e, PermissionError):
+                        e = "file is in use or read-only (is The Sims 4 still running?)"
                     res.errors.append(f"{desc}: {e}")
                     log(f"  ERROR  {desc}: {e}")
                     continue

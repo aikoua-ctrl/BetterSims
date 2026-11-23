@@ -1,11 +1,12 @@
 """Script mod (.ts4script) problems."""
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from ..model import Action, FileEntry, Finding, Severity
 from ..scanner import Inventory
+from .packages import base_name, names_title, unreadable
 
 # The Sims 4 runs Python 3.7. Its .pyc files start with this magic number.
 GAME_PYC_MAGIC = (3394).to_bytes(2, "little") + b"\r\n"
@@ -26,9 +27,12 @@ def _pyc_version(magic: bytes) -> str:
 def check_scripts(inv: Inventory) -> list[Finding]:
     out: list[Finding] = []
     scripts = [f for f in inv.scripts() if f.size > 0]
-    wrong_python: list[tuple[FileEntry, str]] = []
+    compiled: dict[Path, tuple[FileEntry, bytes]] = {}
     for f in scripts:
         info = inv.script(f)
+        if isinstance(info, OSError):
+            out.append(unreadable(f, info))
+            continue
         if isinstance(info, Exception):
             out.append(
                 Finding(
@@ -57,9 +61,10 @@ def check_scripts(inv: Inventory) -> list[Finding]:
                 )
             )
             continue
-        bad = {v for v in info.pyc_magics.values() if v[:4] != GAME_PYC_MAGIC}
-        if info.pyc_magics and len(bad) and all(v[:4] != GAME_PYC_MAGIC for v in info.pyc_magics.values()):
-            wrong_python.append((f, _pyc_version(next(iter(bad)))))
+        if info.pyc_magics:
+            magics = {v[:4] for v in info.pyc_magics.values()}
+            if len(magics) == 1:
+                compiled[f.path] = (f, next(iter(magics)))
         if info.risky:
             out.append(
                 Finding(
@@ -74,22 +79,40 @@ def check_scripts(inv: Inventory) -> list[Finding]:
                     auto=False,
                 )
             )
-    # If most scripts "mismatch", the game itself probably moved to a newer Python: don't flag.
-    if wrong_python and len(wrong_python) <= max(1, len(scripts) // 2):
-        for f, ver in wrong_python:
-            out.append(
-                Finding(
-                    "wrong-python",
-                    Severity.CRITICAL,
-                    f"Script mod built for the wrong Python: {f.path.name}",
-                    f"It was compiled for Python {ver}, but The Sims 4 runs Python 3.7, so the game can't "
-                    "load it. This usually means the mod is broken or isn't really for Sims 4.",
-                    [f.path],
-                    fix_label="Quarantine it",
-                    actions=[Action("quarantine", f.path)],
-                )
-            )
+    out += _wrong_python(compiled)
     out += _module_conflicts(inv, scripts)
+    return out
+
+
+def _wrong_python(compiled: dict[Path, tuple[FileEntry, bytes]]) -> list[Finding]:
+    """Flag script mods compiled for a different Python than the game uses.
+
+    The Sims 4 has run Python 3.7 for years. If EA ever upgrades it, up-to-date mods will be
+    recompiled, so the version most of your script mods use wins over the hard-coded 3.7."""
+    if not compiled:
+        return []
+    counts = Counter(m for _, m in compiled.values())
+    target, n = counts.most_common(1)[0]
+    if n < 3 or n <= len(compiled) // 2:
+        target = GAME_PYC_MAGIC  # too few mods to vote: trust the known game version
+    out = []
+    for f, magic in compiled.values():
+        if magic == target:
+            continue
+        out.append(
+            Finding(
+                "wrong-python",
+                Severity.CRITICAL,
+                f"Script mod built for a different Python: {f.path.name}",
+                f"It was compiled for Python {_pyc_version(magic)}, but your game uses Python "
+                f"{_pyc_version(target)} (the version your other script mods are built for). The game "
+                "can't load it: it's either outdated, for a different game version, or not a Sims 4 mod.",
+                [f.path],
+                fix_label="Quarantine it",
+                actions=[Action("quarantine", f.path)],
+                auto=False,
+            )
+        )
     return out
 
 
@@ -118,17 +141,22 @@ def _module_conflicts(inv: Inventory, scripts: list[FileEntry]) -> list[Finding]
         files = [entries[p] for p in sorted(paths)]
         keep = sorted(files, key=lambda f: -f.mtime)[0]
         rest = [f for f in files if f is not keep]
+        same_mod = len({base_name(f.path.stem) for f in files}) == 1
+        why = ("These look like two versions of the same mod." if same_mod else
+               "These look like different mods that bundle a module with the same name. Check which "
+               "one you want, or ask the creators for compatible versions.")
         out.append(
             Finding(
                 "script-conflict",
                 Severity.CRITICAL,
-                f"Script mods overwrite each other: {' vs '.join(f.path.name for f in files)}",
+                f"Script mods overwrite each other: {names_title(files)}",
                 f"They ship {len(mods)} Python module(s) with the same name but different code "
                 f"(e.g. {', '.join(sorted(mods)[:3])}). Only one copy gets loaded, which usually breaks "
-                "the other. This is almost always two versions of the same mod.",
+                f"the other. {why}",
                 [f.path for f in files],
                 fix_label=f"Keep the newest ({keep.path.name}), quarantine the other {len(rest)}",
                 actions=[Action("quarantine", f.path) for f in rest],
+                auto=same_mod,
             )
         )
     return out

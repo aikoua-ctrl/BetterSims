@@ -24,7 +24,15 @@ A Windows app that scans your Sims 4 Mods folder, finds everything that breaks m
 | Stale caches (`localthumbcache.package` etc.) | Clears them (the game rebuilds them) |
 | Your own list of known-bad mods (`BetterSims/known_issues.json`) | Flags or quarantines them |
 
-When nothing points at a specific mod, the **50/50 helper** finds it for you: it turns half your mods off (renaming to `.packageOFF`, same as Sims 4 Mod Manager), you test the game and click "still broken" or "problem gone", and a few rounds later it names the bad mod and turns everything back on.
+When nothing points at a specific mod, the **50/50 helper** finds it for you: it turns half your mods off (renaming to `.packageOFF`, same as Sims 4 Mod Manager), you test the game and click "still broken" or "problem gone", and a few rounds later it names the bad mod and turns everything back on. A mod's `.package` and `.ts4script` are always switched together, and when the search narrows down to one big folder (like a "CC" folder) it carries on inside it.
+
+### What gets fixed automatically and what waits for you
+
+Pre-ticked (safe): folder depth, zipped mods, broken and empty files, exact duplicates, old versions of the same mod, two versions of the same script mod, Options.ini, Resource.cfg, misplaced/junk/program files.
+
+Your call (not pre-ticked): package conflicts between different mods (one may be a patch for the other), script mods from different creators that clash, mods blamed by error logs, mods built for a different Python version, clearing caches and archiving error logs.
+
+BetterSims refuses to apply fixes while The Sims 4 is running, and won't touch anything outside your Sims 4 folder. Files it can't open (locked, too-long path) are reported, never removed.
 
 ## Using it
 

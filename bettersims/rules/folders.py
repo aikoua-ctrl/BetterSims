@@ -72,7 +72,7 @@ def check_resource_cfg(inv: Inventory) -> list[Finding]:
                 actions=[Action("write", cfg, content=DEFAULT_RESOURCE_CFG)],
             )
         ]
-    text = cfg.read_text(errors="replace").lower()
+    text = cfg.read_text(encoding="utf-8", errors="replace").lower()
     if "packedfile" not in text:
         return [
             Finding(
@@ -153,7 +153,7 @@ def check_misplaced(inv: Inventory) -> list[Finding]:
             try:
                 with zipfile.ZipFile(f.path) as z:
                     names = [n for n in z.namelist() if not n.endswith("/")]
-            except zipfile.BadZipFile:
+            except Exception:  # noqa: BLE001 - damaged, encrypted, unsupported...
                 out.append(
                     Finding(
                         "archive",

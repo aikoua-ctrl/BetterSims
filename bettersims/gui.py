@@ -1,9 +1,11 @@
 """Desktop window (tkinter, ships with Python on Windows)."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+import queue
 import threading
 import tkinter as tk
 import webbrowser
@@ -12,7 +14,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import __version__, bisect, demo, fixer, report
 from .model import Action, Finding, Severity
-from .paths import app_dir, find_sims_dirs
+from .model import PACKAGE_EXT, SCRIPT_EXT
+from .paths import app_dir, check_sims_dir, find_sims_dirs, game_running
 from .rules import run_rules
 from .scanner import scan
 
@@ -38,6 +41,9 @@ class App(tk.Tk):
         self.findings: list[Finding] = []
         self.checked: set[int] = set()
         self.inv = None
+        self.busy = False
+        self.events: queue.Queue = queue.Queue()  # worker threads never touch widgets directly
+        self.after(100, self._pump)
 
         found = find_sims_dirs()
         self.dir_var = tk.StringVar(value=sims_dir or (str(found[0]) if found else ""))
@@ -98,11 +104,46 @@ class App(tk.Tk):
 
     def require_dir(self) -> Path | None:
         d = self.sims_dir
-        if not d or not d.is_dir():
+        if not d:
             messagebox.showwarning("BetterSims", "Pick your 'The Sims 4' folder first "
                                    "(Documents\\Electronic Arts\\The Sims 4).")
             return None
+        problem = check_sims_dir(d)
+        if problem:
+            messagebox.showwarning("BetterSims", problem)
+            return None
+        if self.busy:
+            messagebox.showinfo("BetterSims", "Please wait, still working on the last step.")
+            return None
         return d
+
+    def _pump(self) -> None:
+        try:
+            while True:
+                fn, args = self.events.get_nowait()
+                fn(*args)
+        except queue.Empty:
+            pass
+        self.after(100, self._pump)
+
+    def _background(self, work, done) -> None:
+        """Run work() off the UI thread, then done(result) on it. Errors are shown, never swallowed."""
+        self.busy = True
+
+        def run():
+            try:
+                result = work()
+            except Exception as e:  # noqa: BLE001
+                self.events.put((self._failed, (e,)))
+                return
+            self.events.put((done, (result,)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _failed(self, e: Exception) -> None:
+        self.busy = False
+        self.status.set("Something went wrong.")
+        messagebox.showerror("BetterSims", f"Something went wrong:\n{e}")
 
     def browse(self) -> None:
         d = filedialog.askdirectory(title="Select your 'The Sims 4' folder")
@@ -123,24 +164,23 @@ class App(tk.Tk):
         d = self.require_dir()
         if not d:
             return
-        self.status.set("Scanning...")
+        self.status.set("Scanning... (big Mods folders can take a minute)")
         self.progress["value"] = 0
 
         def work():
-            try:
-                inv = scan(d)
-                fs = run_rules(inv, lambda i, n, name: self.after(0, self._progress, i, n))
-                report.write(inv, fs, app_dir(d) / "report.html")
-                self.after(0, self._show, inv, fs)
-            except Exception as e:  # noqa: BLE001 - show any failure to the user
-                self.after(0, lambda: messagebox.showerror("Scan failed", str(e)))
+            inv = scan(d)
+            fs = run_rules(inv, lambda i, n, name: self.events.put((self._progress, (i, n))))
+            report.write(inv, fs, app_dir(d) / "report.html")
+            return inv, fs
 
-        threading.Thread(target=work, daemon=True).start()
+        self._background(work, lambda r: self._show(*r))
 
     def _progress(self, i: int, n: int) -> None:
         self.progress["value"] = 100 * (i + 1) / n
 
     def _show(self, inv, findings: list[Finding]) -> None:
+        self.busy = False
+        self.detail.delete("1.0", "end")
         self.inv, self.findings = inv, findings
         self.checked = {i for i, f in enumerate(findings) if f.fixable and f.auto}
         self.tree.delete(*self.tree.get_children())
@@ -189,30 +229,43 @@ class App(tk.Tk):
         d = self.require_dir()
         if not d or not findings:
             return
+        if game_running():
+            messagebox.showwarning("BetterSims", "The Sims 4 is still running. Close the game first, "
+                                   "because it locks mod files while it's open.")
+            return
         n = sum(len(f.actions) for f in findings)
         if not messagebox.askokcancel("BetterSims", f"{what}: {n} change(s).\n\nClose The Sims 4 first. "
                                       "Nothing is deleted: removed files go to the quarantine folder and "
                                       "'Undo last fix' puts everything back."):
             return
-        res = fixer.Fixer(d).apply(findings, log=lambda *_: None)
-        msg = f"Done: {len(res.done)} change(s)."
-        if res.errors:
-            msg += f"\n{len(res.errors)} problem(s):\n" + "\n".join(res.errors[:10])
-        messagebox.showinfo("BetterSims", msg)
-        self.scan()
+        self.status.set("Fixing...")
+
+        def done(res):
+            self.busy = False
+            msg = f"Done: {len(res.done)} change(s)."
+            if res.errors:
+                msg += f"\n\n{len(res.errors)} couldn't be done:\n" + "\n".join(res.errors[:10])
+            messagebox.showinfo("BetterSims", msg)
+            self.scan()
+
+        self._background(lambda: fixer.Fixer(d).apply(findings, log=lambda *_: None), done)
 
     def fix_checked(self) -> None:
         self._apply([self.findings[i] for i in sorted(self.checked)], "Apply checked fixes")
 
     def remove_selected(self) -> None:
-        files = []
+        """Quarantine the mod files of the selected rows. Only mod files: never Options.ini, logs etc."""
+        mod_exts = (PACKAGE_EXT, SCRIPT_EXT, ".zip", ".rar", ".7z", ".packageoff", ".ts4scriptoff")
+        files: list[Path] = []
         for row in self.tree.selection():
-            files += [p for p in self.findings[int(row)].files if p.exists()]
+            for p in self.findings[int(row)].files:
+                if p.is_file() and p.suffix.lower() in mod_exts and p not in files:
+                    files.append(p)
         if not files:
-            messagebox.showinfo("BetterSims", "Select one or more rows first.")
+            messagebox.showinfo("BetterSims", "Select one or more rows that list mod files first.")
             return
         f = Finding("manual", Severity.INFO, "Manual removal", "", files, [Action("quarantine", p) for p in files])
-        self._apply([f], f"Remove {len(files)} file(s) into quarantine")
+        self._apply([f], f"Remove {len(files)} mod file(s) into quarantine")
 
     def undo_last(self) -> None:
         d = self.require_dir()
@@ -222,7 +275,11 @@ class App(tk.Tk):
         if not sessions:
             messagebox.showinfo("BetterSims", "Nothing to undo.")
             return
-        problems = fixer.undo(d, sessions[-1]["session"], log=lambda *_: None)
+        try:
+            problems = fixer.undo(d, sessions[-1]["session"], log=lambda *_: None)
+        except (fixer.FixError, OSError) as e:
+            messagebox.showerror("BetterSims", f"Couldn't undo: {e}")
+            return
         messagebox.showinfo("BetterSims", "Undone." if not problems else "Undone, with issues:\n" + "\n".join(problems[:10]))
         self.scan()
 
@@ -263,11 +320,32 @@ class App(tk.Tk):
         row = ttk.Frame(win, padding=8)
         row.pack()
 
+        found_btn = ttk.Button(win, text="Remove the bad mod (quarantine)")
+
         def run(fn):
+            if game_running():
+                txt.set("Close The Sims 4 before each step: the game locks mod files while it's open.")
+                return
             try:
                 txt.set(fn())
             except SystemExit as e:
                 txt.set(str(e))
+            except OSError as e:
+                txt.set(f"Couldn't rename a mod file: {e}")
+            if txt.get().startswith("Found it"):
+                found_btn.pack(pady=6)
+
+        def remove_found():
+            p = bisect.last_found_path(d)
+            if not p.exists():
+                return
+            files = [d / "Mods" / f for f in json.loads(p.read_text())["files"]]
+            files = [f for f in files if f.exists()]
+            win.destroy()
+            f = Finding("manual", Severity.INFO, "Bisect culprit", "", files, [Action("quarantine", x) for x in files])
+            self._apply([f], f"Remove {len(files)} file(s) into quarantine")
+
+        found_btn.configure(command=remove_found)
 
         ttk.Button(row, text="Start", command=lambda: run(lambda: bisect.start(d))).pack(side="left", padx=4)
         ttk.Button(row, text="Still broken", command=lambda: run(lambda: bisect.answer(d, True))).pack(side="left", padx=4)

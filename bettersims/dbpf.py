@@ -60,6 +60,10 @@ def type_name(t: int) -> str:
     return TYPE_NAMES.get(t, f"type 0x{t:08X}")
 
 
+DELETED = 0xFFE0
+ZLIB = 0x5A42
+
+
 class DbpfError(Exception):
     pass
 
@@ -99,10 +103,19 @@ class Package:
         return self._by_key[key]
 
     def chunk_hash(self, entry: IndexEntry) -> str:
-        """Hash of a resource's raw bytes, to tell identical overrides from real ones."""
+        """Hash of a resource's content, to tell identical overrides from real ones.
+
+        zlib resources are decompressed first, so the same data saved by two different tools
+        still counts as identical. Other compressions are compared as stored."""
         with open(self.path, "rb") as f:
             f.seek(entry.offset)
-            return hashlib.sha1(f.read(entry.packed_size)).hexdigest()
+            raw = f.read(entry.packed_size)
+        if entry.compression == ZLIB:
+            try:
+                raw = zlib.decompress(raw)
+            except zlib.error:
+                pass
+        return hashlib.sha1(raw).hexdigest()
 
 
 def read_package(path: Path) -> Package:
@@ -119,6 +132,8 @@ def read_package(path: Path) -> Package:
         count = struct.unpack_from("<I", header, 36)[0]
         index_size = struct.unpack_from("<I", header, 44)[0]
         index_offset = struct.unpack_from("<I", header, 64)[0]
+        if index_offset == 0:  # some tools only fill the older index position field
+            index_offset = struct.unpack_from("<I", header, 40)[0]
         if count == 0:
             return Package(path, major, minor, [])
         size = path.stat().st_size
@@ -144,6 +159,8 @@ def read_package(path: Path) -> Package:
                     vals[i] = struct.unpack_from("<I", buf, pos)[0]
                     pos += 4
             rtype, group, ihi, ilo, off, fsize, msize, comp = vals
+            if comp & 0xFFFF == DELETED:
+                continue  # deleted record left behind by an editor, not a real resource
             entries.append(
                 IndexEntry(
                     key=ResourceKey(rtype, group, (ihi << 32) | ilo),

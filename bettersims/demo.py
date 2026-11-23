@@ -76,7 +76,6 @@ def build(root: Path) -> Path:
     # Still zipped.
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        inner = io.BytesIO()
         tmp = root / "_tmp.package"
         write_package(tmp, [(keys(OBJ, 800, 1)[0], b"lamp")])
         z.write(tmp, "NiceLamp/NiceLamp.package")

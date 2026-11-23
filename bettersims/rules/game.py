@@ -47,7 +47,7 @@ def check_crash_logs(inv: Inventory) -> list[Finding]:
     modules = _top_modules(inv)
     blame: Counter[Path] = Counter()
     for log in logs:
-        text = log.read_text(errors="replace")
+        text = log.read_text(encoding="utf-8", errors="replace")
         hits: set[Path] = set()
         for m in TS4SCRIPT_RE.findall(text) + PACKAGE_RE.findall(text):
             f = by_name.get(m.lower())
@@ -88,13 +88,15 @@ def check_crash_logs(inv: Inventory) -> list[Finding]:
             logs,
             fix_label="Archive the logs (quarantine)",
             actions=[Action("quarantine", p) for p in logs],
+            auto=False,  # keep the evidence until the user has dealt with the culprit
         )
     )
     return out
 
 
 def _read_ini(path: Path) -> str:
-    return path.read_text(errors="replace")
+    # surrogateescape keeps any odd bytes exactly as they were when the file is written back
+    return path.read_text(encoding="utf-8", errors="surrogateescape")
 
 
 def check_options_ini(inv: Inventory) -> list[Finding]:
@@ -149,6 +151,7 @@ def check_caches(inv: Inventory) -> list[Finding]:
             items,
             fix_label="Clear them (quarantine)",
             actions=[Action("quarantine", p) for p in items],
+            auto=False,  # the game recreates caches every launch; only clear when the user wants
         )
     ]
 
