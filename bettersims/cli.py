@@ -8,6 +8,7 @@ import webbrowser
 from pathlib import Path
 
 from . import __version__, bisect, demo, fixer, report
+from .explain import explain, summary
 from .model import Action, Finding, Severity
 from .paths import app_dir, game_running, resolve_sims_dir
 from .rules import run_rules
@@ -41,8 +42,17 @@ def cmd_scan(a) -> int:
     print(f"Scanned {sims}\n  {len(inv.packages())} packages, {len(inv.scripts())} script mods\n")
     for f in findings:
         print(f"{ICON[f.severity]} {f.title}   ({f.id(sims)})")
+        ex = explain(f)
+        print(f"      {summary(f)}")
         if a.verbose:
-            print(f"      {f.detail}")
+            print(f"      What's wrong: {ex.wrong}")
+            if f.fixable and ex.fix:
+                print(f"      What the fix does: {ex.fix}")
+            if ex.safety:
+                print(f"      Is it safe? {ex.safety}")
+            for name, what in ex.options:
+                print(f"      - {name}: {what}")
+            print(f"      Technical: {f.detail}")
             for p in f.files[:10]:
                 print(f"      - {p}")
         if f.fixable:

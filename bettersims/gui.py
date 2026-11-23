@@ -15,6 +15,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 from . import __version__, bisect, demo, fixer, report
+from .explain import explain, summary
 from .model import PACKAGE_EXT, SCRIPT_EXT, Action, Finding, Severity
 from .paths import app_dir, check_sims_dir, find_sims_dirs, game_running
 from .rules import run_rules
@@ -458,7 +459,7 @@ class App(ctk.CTk):
         for i, f in enumerate(self.findings):
             if self.filter != "All" and SEV[f.severity][2] != self.filter:
                 continue
-            if self.search and self.search not in (f.title + " " + f.detail + " " +
+            if self.search and self.search not in (f.title + " " + f.detail + " " + summary(f) + " " +
                                                    " ".join(p.name for p in f.files)).lower():
                 continue
             out.append(i)
@@ -503,7 +504,10 @@ class App(ctk.CTk):
             pill(top, "YOUR CALL", VIOLET, "#251d47").pack(side="left", padx=6)
         ctk.CTkLabel(card, text=f.title, font=self.f(15, "bold"), text_color=TEXT, anchor="w", justify="left",
                      wraplength=640).grid(row=1, column=2, sticky="ew", padx=(6, 0), pady=(6, 0))
-        sub = f"→  {f.fix_label}" if f.fixable else "Nothing to fix here, just good to know."
+        ex = explain(f)
+        sub = summary(f)
+        if f.fixable and ex.fix:
+            sub += "\n\u2192  Fix: " + ex.fix.split(". ")[0].rstrip(".") + "."
         ctk.CTkLabel(card, text=sub, font=self.f(13), text_color=MUTED, anchor="w", justify="left",
                      wraplength=640).grid(row=2, column=2, sticky="ew", padx=(6, 0), pady=(2, 14))
 
@@ -519,8 +523,24 @@ class App(ctk.CTk):
         if open_:
             d = ctk.CTkFrame(card, fg_color=BG, corner_radius=10)
             d.grid(row=3, column=1, columnspan=3, sticky="ew", padx=(14, 14), pady=(0, 14))
-            ctk.CTkLabel(d, text=f.detail, font=self.f(13), text_color=TEXT, wraplength=820, justify="left",
-                         anchor="w").pack(fill="x", padx=14, pady=(12, 6))
+            self._section(d, "WHAT'S WRONG", ex.wrong)
+            if f.fixable and ex.fix:
+                self._section(d, "WHAT FIX WILL DO", ex.fix)
+            if ex.safety:
+                self._section(d, "IS IT SAFE?", ex.safety, ACCENT if ex.safety.startswith("Safe") else VIOLET)
+            ctk.CTkLabel(d, text="YOUR CHOICES", font=self.f(10, "bold"), text_color=FAINT, anchor="w").pack(
+                fill="x", padx=14, pady=(12, 2))
+            for name, what in ex.options:
+                row = ctk.CTkFrame(d, fg_color=CARD, corner_radius=8)
+                row.pack(fill="x", padx=14, pady=2)
+                ctk.CTkLabel(row, text=name, font=self.f(12, "bold"), text_color=TEXT, width=130, anchor="w").pack(
+                    side="left", padx=(12, 6), pady=8, anchor="n")
+                ctk.CTkLabel(row, text=what, font=self.f(12), text_color=MUTED, wraplength=640, justify="left",
+                             anchor="w").pack(side="left", fill="x", expand=True, padx=(0, 12), pady=8)
+            ctk.CTkLabel(d, text="TECHNICAL DETAILS", font=self.f(10, "bold"), text_color=FAINT, anchor="w").pack(
+                fill="x", padx=14, pady=(14, 2))
+            ctk.CTkLabel(d, text=f.detail, font=self.f(12), text_color=FAINT, wraplength=820, justify="left",
+                         anchor="w").pack(fill="x", padx=14, pady=(0, 4))
             for p in f.files[:8]:
                 ctk.CTkLabel(d, text="•  " + self._rel(p), font=ctk.CTkFont("Consolas", 12), text_color=MUTED,
                              anchor="w", justify="left", wraplength=820).pack(fill="x", padx=14)
@@ -534,6 +554,12 @@ class App(ctk.CTk):
             else:
                 ctk.CTkLabel(d, text="", height=6).pack()
         bind_hover(card, CARD, CARD_HOVER)
+
+    def _section(self, parent, title: str, body: str, color: str = TEXT) -> None:
+        ctk.CTkLabel(parent, text=title, font=self.f(10, "bold"), text_color=FAINT, anchor="w").pack(
+            fill="x", padx=14, pady=(12, 0))
+        ctk.CTkLabel(parent, text=body, font=self.f(13), text_color=color, wraplength=820, justify="left",
+                     anchor="w").pack(fill="x", padx=14)
 
     def _rel(self, p: Path) -> str:
         try:

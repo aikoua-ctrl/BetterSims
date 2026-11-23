@@ -372,3 +372,24 @@ def test_game_runner_watching(sims, monkeypatch, scenario, expect_broken, expect
     r = autobisect.GameRunner(Path("TS4_x64.exe"), minutes=1, startup_minutes=1, log=lambda *_: None)
     o = r.run(sims, threading.Event())
     assert (o.broken, o.failed) == (expect_broken, expect_failed), o.reason
+
+
+def test_every_problem_type_has_a_plain_explanation():
+    import re
+    from bettersims import explain
+    src = "".join(p.read_text() for p in (Path(__file__).parent.parent / "bettersims" / "rules").glob("*.py"))
+    rules = set(re.findall(r'Finding\(\s*"([a-z-]+)"', src))
+    assert rules, "found no rules"
+    missing = rules - set(explain._TEXT) - {"known-issues"}
+    assert not missing, f"no plain explanation for {missing}"
+
+
+def test_explanations_render_for_demo(sims):
+    from bettersims.explain import explain, summary
+    _, findings = run_scan(sims)
+    for f in findings:
+        e = explain(f)
+        assert e.wrong and summary(f)
+        assert e.options and e.options[-1][0] == "Leave it"
+        if f.fixable:
+            assert e.fix and e.options[0][0] == "Fix"

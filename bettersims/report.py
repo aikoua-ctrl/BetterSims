@@ -5,6 +5,7 @@ import html
 import time
 from pathlib import Path
 
+from .explain import explain
 from .model import Finding, Severity
 from .scanner import Inventory
 
@@ -14,6 +15,18 @@ def _rel(p: Path, base: Path) -> str:
         return str(p.relative_to(base))
     except ValueError:
         return str(p)
+
+
+def plain(f: Finding) -> str:
+    e = explain(f)
+    parts = [f"<p><b>What's wrong:</b> {html.escape(e.wrong)}</p>"]
+    if f.fixable and e.fix:
+        parts.append(f"<p><b>What the fix does:</b> {html.escape(e.fix)}</p>")
+    if e.safety:
+        parts.append(f"<p><b>Is it safe?</b> {html.escape(e.safety)}</p>")
+    opts = "".join(f"<li><b>{html.escape(n)}:</b> {html.escape(w)}</li>" for n, w in e.options)
+    parts.append(f"<p><b>Your choices:</b></p><ul class=\"opts\">{opts}</ul>")
+    return "".join(parts)
 
 
 def render(inv: Inventory, findings: list[Finding]) -> str:
@@ -33,7 +46,7 @@ def render(inv: Inventory, findings: list[Finding]) -> str:
             f'<details class="f {f.severity.value}" {"open" if f.severity != Severity.INFO else ""}>'
             f'<summary><span class="tag">{f.severity.value}</span> {html.escape(f.title)}'
             f'<span class="id">{f.id(inv.sims_dir)}</span></summary>'
-            f"<p>{html.escape(f.detail)}</p>{fix}<ul>{files}</ul></details>"
+            f"{plain(f)}{fix}<p class=\"tech\">{html.escape(f.detail)}</p><ul>{files}</ul></details>"
         )
     body = "\n".join(rows) or '<p class="ok">No problems found. Your Mods folder looks healthy.</p>'
     return f"""<!doctype html>
@@ -52,7 +65,7 @@ summary{{cursor:pointer;font-weight:600}} .tag{{font-size:11px;text-transform:up
 .critical .tag{{color:var(--crit)}} .warning .tag{{color:var(--warn)}} .info .tag{{color:var(--info)}}
 .id{{float:right;font:12px monospace;color:var(--muted)}} ul{{font:13px monospace;color:var(--muted);overflow-wrap:anywhere}}
 .fix{{background:var(--bg);padding:6px 10px;border-radius:6px}} .how{{color:var(--muted);font-size:13px}} code{{font-size:13px}}
-.ok{{font-size:18px}}
+.ok{{font-size:18px}} .tech{{color:var(--muted);font-size:13px}} .opts{{font:inherit;color:inherit}}
 </style></head><body><main>
 <h1>BetterSims report</h1>
 <p class="muted">{html.escape(str(inv.sims_dir))} &middot; {time.strftime("%Y-%m-%d %H:%M")}</p>
