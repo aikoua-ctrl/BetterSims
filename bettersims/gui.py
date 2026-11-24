@@ -21,7 +21,7 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from . import __version__, bisect, demo, fixer, report
+from . import __version__, bisect, demo, fixer, hud, report
 from .explain import explain, summary
 from .hud import (BG, BODY_FONT, BORDER, CARD, CARD_HOVER, DISPLAY_FONT, FAINT, GLOW, GLOW_HOVER, GLOW_TEXT, GOLD,
                   GREEN, MONO_FONT, MUTED, RAISED, RED, SIDEBAR, TEXT, HudBar, HudLog, Reactor, alive,
@@ -41,6 +41,25 @@ SEV = {
 }
 MOD_EXTS = (PACKAGE_EXT, SCRIPT_EXT, ".zip", ".rar", ".7z", ".packageoff", ".ts4scriptoff")
 SPIN = "◐◓◑◒"
+
+
+def settings_path() -> Path:
+    return Path(os.environ.get("APPDATA") or Path.home()) / "BetterSims" / "settings.json"
+
+
+def load_settings() -> dict:
+    try:
+        return json.loads(settings_path().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(data: dict) -> None:
+    try:
+        settings_path().parent.mkdir(parents=True, exist_ok=True)
+        settings_path().write_text(json.dumps(data))
+    except OSError:
+        pass  # a missing preference file is never worth an error
 
 
 def open_path(p: Path) -> None:
@@ -180,6 +199,9 @@ STEP_OF = {"scan": 0, "fix": 0, "test": 1, "search": 2, "remove": 3, "done": 4}
 class App(ctk.CTk):
     def __init__(self, sims_dir: str | None):
         ctk.set_appearance_mode("dark")
+        self.settings = load_settings()
+        reduce = self.settings.get("reduce_motion")
+        hud.MOTION = not (hud.system_reduce_motion() if reduce is None else reduce)
         super().__init__(fg_color=BG)
         self.title(f"BetterSims {__version__}")
         self.geometry("1280x820")
@@ -244,11 +266,14 @@ class App(ctk.CTk):
         self.after(60, self._pump)
 
     def _blink(self) -> None:
-        """Sidebar status light: steady when idle, blinking while working."""
-        on = not self.busy or int(time.time() * 2.5) % 2 == 0
-        self.sys_dot.configure(text_color=(GOLD if self.busy else GREEN) if on else mix(SIDEBAR, GOLD, 0.25))
-        self.sys_text.configure(text="WORKING" if self.busy else "SYSTEMS READY")
-        self.after(200, self._blink)
+        """Sidebar status light: steady when idle, blinking while working. Only touches widgets on change."""
+        on = not self.busy or int(time.time() * 2) % 2 == 0
+        state = (self.busy, on)
+        if state != getattr(self, "_blink_state", None):
+            self._blink_state = state
+            self.sys_dot.configure(text_color=(GOLD if self.busy else GREEN) if on else mix(SIDEBAR, GOLD, 0.25))
+            self.sys_text.configure(text="WORKING" if self.busy else "SYSTEMS READY")
+        self.after(250 if self.busy else 600, self._blink)
 
     def _background(self, work, done) -> None:
         self.busy = True
@@ -354,6 +379,11 @@ class App(ctk.CTk):
 
         status = ctk.CTkFrame(sb, fg_color="transparent")
         status.pack(side="bottom", fill="x", padx=22, pady=(0, 14))
+        self.motion_var = ctk.BooleanVar(value=not hud.MOTION)
+        ctk.CTkSwitch(sb, text="Reduce motion", variable=self.motion_var, command=self._toggle_motion,
+                      font=self.f(12), text_color=MUTED, progress_color=GLOW, button_color=TEXT,
+                      button_hover_color="#ffffff", fg_color=RAISED, switch_width=36, switch_height=18).pack(
+            side="bottom", anchor="w", padx=22, pady=(0, 8))
         self.sys_dot = ctk.CTkLabel(status, text="●", font=self.f(12), text_color=GREEN)
         self.sys_dot.pack(side="left")
         self.sys_text = ctk.CTkLabel(status, text="SYSTEMS READY", font=self.d(10), text_color=FAINT)
@@ -370,6 +400,15 @@ class App(ctk.CTk):
         link_button(folder, "Try a demo folder", self.make_demo, height=30).pack(fill="x", padx=12, pady=(4, 12))
         glow_hover(folder)
 
+    def _toggle_motion(self) -> None:
+        hud.MOTION = not self.motion_var.get()
+        self.settings["reduce_motion"] = not hud.MOTION
+        save_settings(self.settings)
+        self.logo.set_mode("busy" if self.busy else "idle")  # restart or stop the spinner
+        if hud.MOTION and self.rep_stop is not None:
+            self.reactor.set_mode("busy")
+        self.toast("Animations reduced." if not hud.MOTION else "Animations on.")
+
     def _move_indicator(self, key: str, animate: bool = True) -> None:
         b = self.nav[key]
         self.update_idletasks()
@@ -380,7 +419,7 @@ class App(ctk.CTk):
             self.nav_ind.place(x=8, y=y_to)
             return
         y_from = self.nav_ind.winfo_y() / scale
-        tween(self.nav_ind, lambda t: self.nav_ind.place(x=8, y=y_from + (y_to - y_from) * t), frames=10, ms=16)
+        tween(self.nav_ind, lambda t: self.nav_ind.place(x=8, y=y_from + (y_to - y_from) * t), frames=6, ms=16)
 
     def show(self, key: str, animate: bool = True) -> None:
         for k, b in self.nav.items():
@@ -391,11 +430,7 @@ class App(ctk.CTk):
             if k != key:
                 p.place_forget()
         page = self.pages[key]
-        if animate and key != self.current:
-            tween(page, lambda t: page.place(x=50 * (1 - t), y=0, relwidth=1, relheight=1), frames=12, ms=16,
-                  key="_slide")
-        else:
-            page.place(x=0, y=0, relwidth=1, relheight=1)
+        page.place(x=0, y=0, relwidth=1, relheight=1)  # instant: sliding a page re-lays out every widget on it
         self.current = key
         if key == "history":
             self.refresh_history()
@@ -503,22 +538,21 @@ class App(ctk.CTk):
         ctk.CTkLabel(box, text=text, font=self.f(16), text_color=MUTED).pack(pady=6)
 
     def _set_scanning(self, on: bool) -> None:
+        """The bar sweeps only while a scan or fix is actually running; otherwise it holds still."""
         self.scanning = on
         if on:
             self.scan_btn.configure(state="disabled")
-            self.progress.ambient = False
             self.progress.set(0.03)
             self.progress.start()
             self._spin_scan()
         else:
             self.scan_btn.configure(state="normal", text="⟳  SCAN NOW")
+            self.progress.stop()
             self.progress.set(1)
-            self.progress.ambient = True
 
             def settle():
                 if not getattr(self, "scanning", False):
                     self.progress.set(0)
-                    self.progress.start()
             self.after(700, settle)
 
     def _spin_scan(self, i: int = 0) -> None:
@@ -652,7 +686,7 @@ class App(ctk.CTk):
                           hover=mix(RAISED, GLOW, 0.4), text_color=TEXT).pack(side="left", padx=4)
         if open_:
             self._details(card, f, ex)
-        glow_hover(card, BORDER, color, fg=(CARD, CARD_HOVER))
+        glow_hover(card, BORDER, color)
         return card
 
     def _details(self, card, f: Finding, ex) -> None:
@@ -748,7 +782,6 @@ class App(ctk.CTk):
                                   "folder, and 'Undo last fix' puts everything back.", "Go ahead"):
             return
         self.fix_btn.configure(text="Fixing...", state="disabled")
-        self.progress.ambient = False
         self.progress.start()
 
         def done(res):
@@ -925,9 +958,17 @@ class App(ctk.CTk):
         self.rep_tries.set("1")
         self.rep_tries.grid(row=3, column=1, sticky="w")
         self._label(card, 4, "Remove at most")
-        self.rep_max = segmented(card, ["3 mods", "5 mods", "10 mods"])
-        self.rep_max.set("5 mods")
-        self.rep_max.grid(row=4, column=1, sticky="w")
+        maxrow = ctk.CTkFrame(card, fg_color="transparent")
+        maxrow.grid(row=4, column=1, columnspan=2, sticky="w")
+        self.rep_max = segmented(maxrow, ["3", "5", "10", "Custom"], self._rep_max_mode)
+        self.rep_max.set("5")
+        self.rep_max.pack(side="left")
+        self.rep_custom = ctk.CTkEntry(maxrow, width=64, height=32, fg_color=BG, border_color=BORDER, text_color=TEXT,
+                                       corner_radius=8, font=self.f(12), placeholder_text="e.g. 20")
+        self.rep_custom.bind("<FocusIn>", lambda _e: self.rep_custom.configure(border_color=GLOW))
+        self.rep_custom.bind("<FocusOut>", lambda _e: self.rep_custom.configure(border_color=BORDER))
+        self.rep_custom_hint = ctk.CTkLabel(maxrow, text="mods", font=self.f(12), text_color=MUTED)
+        self.rep_custom_hint.pack(side="left", padx=(8, 0))
         self.rep_cache = ctk.BooleanVar(value=True)
         self.rep_sim = ctk.BooleanVar(value=False)
         for r, (var, text) in enumerate(((self.rep_cache, "Clear the game's cache files too (the game rebuilds them)"),
@@ -957,6 +998,27 @@ class App(ctk.CTk):
         self.rep_log.pack(fill="both", expand=True, padx=16, pady=(0, 16))
         self.rep_log.line("Auto Repair standing by.")
         glow_hover(con)
+
+    def _rep_max_mode(self, value: str) -> None:
+        """Custom shows a box to type any number of mods."""
+        if value == "Custom":
+            self.rep_custom.pack(side="left", padx=(8, 0), before=self.rep_custom_hint)
+            self.rep_custom.focus_set()
+        else:
+            self.rep_custom.pack_forget()
+
+    def rep_limit(self) -> int | None:
+        """The 'remove at most' number, or None (with a message) when the custom box isn't a whole number 1-999."""
+        choice = self.rep_max.get()
+        if choice != "Custom":
+            return int(choice)
+        text = self.rep_custom.get().strip()
+        if text.isdigit() and 1 <= int(text) <= 999:
+            return int(text)
+        self.rep_custom.configure(border_color=RED)
+        self.toast("Type a whole number from 1 to 999 in the custom box for how many mods Auto Repair may remove.",
+                   "warn", 6000)
+        return None
 
     def _paint_steps(self, phase: str, clean: bool | None = None) -> None:
         idx = STEP_OF[phase]
@@ -1021,7 +1083,9 @@ class App(ctk.CTk):
         if game_running():
             self.toast("Close The Sims 4 first. BetterSims will start it for each test.", "warn")
             return
-        limit = int(self.rep_max.get().split()[0])
+        limit = self.rep_limit()
+        if limit is None:
+            return
         if not self.confirm("Start Auto Repair?",
                             "BetterSims will:\n"
                             "1. Fix the safe problems in your files.\n"
@@ -1389,7 +1453,7 @@ class App(ctk.CTk):
             if state == "active":
                 ghost_button(c, "↺  Undo", lambda sid=s["session"]: self.undo(sid), width=100).grid(
                     row=0, column=2, rowspan=2, padx=16)
-            glow_hover(c, BORDER, GLOW, fg=(CARD, CARD_HOVER))
+            glow_hover(c, BORDER, GLOW)
             if r < 12:
                 self.after(r * 40, lambda c=c: materialize(c))
 

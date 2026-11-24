@@ -1,7 +1,15 @@
 """Animated HUD pieces for the desktop app: glowing progress bars, the arc-reactor spinner,
 a typing console, hover glow and small tweens. Everything runs on Tk's own timer (after()),
 so animations keep moving while the real work happens on a background thread.
-Animations idle down to a slow tick when their widget isn't on screen.
+
+Performance rules (Tk redraws are expensive, especially with Windows display scaling):
+  * nothing loops while the app is idle: spinners and sweeps only run while work is running,
+    and stop completely when their widget isn't on screen;
+  * animations move existing canvas items (coords/itemconfigure), they never rebuild them;
+  * hover is a single instant colour change, never a fade, and never re-colours a whole card;
+  * pages switch instantly (moving a page re-lays out every widget on it).
+MOTION = False (the Reduce motion switch, or Windows' "Show animations" turned off) makes every
+animation jump straight to its end state.
 """
 from __future__ import annotations
 
@@ -34,7 +42,22 @@ WIN = sys.platform.startswith("win")
 BODY_FONT = "Segoe UI" if WIN else "Inter"
 DISPLAY_FONT = "Bahnschrift" if WIN else "Inter Display"
 MONO_FONT = "Consolas" if WIN else "JetBrains Mono"
-FPS_MS = 33
+FPS_MS = 40  # 25 fps is plenty for a spinner and keeps CPU low
+MOTION = True  # set by the app: False = reduce motion
+
+
+def system_reduce_motion() -> bool:
+    """True when Windows' 'Show animations in Windows' setting is off."""
+    if not WIN:
+        return False
+    try:
+        import ctypes
+
+        on = ctypes.c_int(1)
+        ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(on), 0)  # SPI_GETCLIENTAREAANIMATION
+        return not on.value
+    except Exception:  # noqa: BLE001 - any failure: keep animations
+        return False
 
 
 def _rgb(c: str) -> tuple[int, int, int]:
@@ -71,6 +94,9 @@ def tween(widget, apply, frames: int = 10, ms: int = 16, done=None, key: str = "
         except (tk.TclError, ValueError):
             pass
 
+    if not MOTION:
+        frames = 1  # reduce motion: straight to the end state
+
     def step(i=1):
         if not alive(widget):
             return
@@ -85,34 +111,34 @@ def tween(widget, apply, frames: int = 10, ms: int = 16, done=None, key: str = "
     step()
 
 
-def count_to(label: ctk.CTkLabel, target: int, suffix: str = "", frames: int = 24) -> None:
+def count_to(label: ctk.CTkLabel, target: int, suffix: str = "", frames: int = 12) -> None:
     """Numbers roll up to their new value instead of jumping."""
     try:
         start = int(str(label.cget("text")).rstrip(suffix) or 0)
     except ValueError:
         start = 0
     tween(label, lambda t: label.configure(text=f"{round(start + (target - start) * t)}{suffix}"),
-          frames=frames, ms=20, key="_count")
+          frames=frames, ms=30, key="_count")
 
 
-def _inside(widget, x: int, y: int) -> bool:
-    w = widget.winfo_containing(x, y)
-    while w is not None:
-        if w is widget:
-            return True
-        w = getattr(w, "master", None)
-    return False
+def _over(widget) -> bool:
+    """Is the pointer inside the widget's rectangle? (Cheap: no widget-tree walk.)"""
+    try:
+        x, y = widget.winfo_pointerxy()
+        x0, y0 = widget.winfo_rootx(), widget.winfo_rooty()
+        return x0 <= x < x0 + widget.winfo_width() and y0 <= y < y0 + widget.winfo_height()
+    except tk.TclError:
+        return False
 
 
-def glow_hover(widget, base: str = BORDER, glow: str = GLOW, strength: float = 0.75,
-               fg: tuple[str, str] | None = None) -> None:
-    """Border lights up (and optionally the fill changes) while the mouse is over the widget or its children."""
+def glow_hover(widget, base: str = BORDER, glow: str = GLOW, strength: float = 0.75) -> None:
+    """Outline lights up while the mouse is over the widget or any of its children.
+
+    One configure() when the hover state actually changes, nothing else: moving the mouse around
+    inside a card costs nothing.
+    """
     lit = mix(base, glow, strength)
-    state = {"t": 0.0}
-
-    def paint(t):
-        state["t"] = t
-        widget.configure(border_color=mix(base, lit, t))
+    state = {"on": False}
 
     def enabled() -> bool:
         try:
@@ -120,28 +146,18 @@ def glow_hover(widget, base: str = BORDER, glow: str = GLOW, strength: float = 0
         except (ValueError, tk.TclError, AttributeError):
             return True
 
-    def go(to: float):
-        if to > 0 and not enabled():
+    def set_on(on: bool) -> None:
+        if on == state["on"] or not alive(widget):
             return
-        if fg:  # the fill switches at once: fading it would redraw every child several times
-            widget.configure(fg_color=fg[1] if to > 0 else fg[0])
-        frm = state["t"]
-        tween(widget, lambda t: paint(frm + (to - frm) * t), frames=7, ms=18, key="_glow")
-
-    def enter(_e):
-        go(1.0)
-
-    def leave(_e):
-        if not alive(widget):
+        if on and not enabled():
             return
-        x, y = widget.winfo_pointerxy()
-        if not _inside(widget, x, y):
-            go(0.0)
+        state["on"] = on
+        widget.configure(border_color=lit if on else base)
 
     def walk(w):
         try:
-            w.bind("<Enter>", enter, add="+")
-            w.bind("<Leave>", leave, add="+")
+            w.bind("<Enter>", lambda _e: set_on(True), add="+")
+            w.bind("<Leave>", lambda _e: set_on(_over(widget)), add="+")
         except NotImplementedError:  # e.g. CTkSegmentedButton: its own buttons get bound below
             pass
         for c in w.winfo_children():
@@ -151,97 +167,130 @@ def glow_hover(widget, base: str = BORDER, glow: str = GLOW, strength: float = 0
 
 
 def materialize(widget, base: str = BORDER, glow: str = GLOW) -> None:
-    """New cards flash their outline and fade it down, so they 'power on' as they appear."""
-    tween(widget, lambda t: widget.configure(border_color=mix(glow, base, t)), frames=14, ms=22, key="_glow")
+    """New cards flash their outline once as they appear (two redraws, not a fade)."""
+    if not MOTION:
+        return
+    widget.configure(border_color=mix(base, glow, 0.6))
+    widget.after(220, lambda: alive(widget) and widget.configure(border_color=base))
 
 
 # ---- HUD progress bar --------------------------------------------------------
 class HudBar(tk.Canvas):
-    """A segmented bar with a light sweep that keeps moving while work runs, so it never looks frozen.
+    """A segmented bar. While work runs a light sweep moves along it, so it never looks frozen.
 
     set(v) moves the fill smoothly to v (0..1). start() turns the sweep on, stop() off.
-    ambient=True keeps a faint sweep running all the time (used as a decorative header line).
+    ambient=True draws it as a faint static header line. All items are created once; animation
+    only moves them, and the timer stops completely when nothing is moving.
     """
+
+    N = 6  # sweep slices
 
     def __init__(self, master, height: int = 6, bg: str = BG, color: str = GLOW, track: str = RAISED,
                  ambient: bool = False, **kw):
         kw.setdefault("width", 1)  # stretch with fill/sticky; a Canvas would otherwise ask for ~380px
         super().__init__(master, height=height, bg=bg, highlightthickness=0, bd=0, **kw)
-        self.color, self.track, self.bgc = color, track, bg
-        self.value = self.target = 0.0
-        self.running = ambient
+        self.color, self.track, self.bgc, self.h = color, track, bg, height
         self.ambient = ambient
+        self.value = self.target = 0.0
+        self.running = False
         self.pos = 0.0
-        self.bind("<Configure>", lambda _e: self._draw())
-        self.after(FPS_MS, self._tick)
+        self._job = None
+        trk = mix(bg, track, 0.4) if ambient else track
+        self.i_track = self.create_rectangle(0, 0, 0, height, fill=trk, width=0)
+        self.i_fill = self.create_rectangle(0, 0, 0, height, fill=mix(track, color, 0.65), width=0)
+        self.i_head = self.create_rectangle(0, 0, 0, height, fill=color, width=0)
+        self.i_sweep = [self.create_rectangle(-10, 0, -10, height, width=0) for _ in range(self.N)]
+        self._sweep_colors()
+        self.notches: list[int] = []
+        self.bind("<Configure>", lambda _e: self._layout())
+
+    def _sweep_colors(self) -> None:
+        for i, it in enumerate(self.i_sweep):
+            a = 1 - abs(i - (self.N - 1) / 2) / (self.N / 2)
+            self.itemconfigure(it, fill=mix(self.track, "#ffffff" if a > 0.8 else self.color, 0.35 + 0.6 * a))
+
+    def _layout(self) -> None:
+        w = self.winfo_width()
+        self.coords(self.i_track, 0, 0, w, self.h)
+        for n in self.notches:
+            self.delete(n)
+        self.notches = []
+        if not self.ambient and self.h >= 5:  # segment notches: static, drawn once per resize
+            self.notches = [self.create_line(w * i / 40, 0, w * i / 40, self.h, fill=self.bgc) for i in range(1, 40)]
+        self._paint()
 
     def set(self, v: float) -> None:
         self.target = max(0.0, min(1.0, float(v)))
+        if not MOTION:
+            self.value = self.target
+        self._wake()
 
     def start(self) -> None:
         self.running = True
+        self._wake()
 
     def stop(self) -> None:
-        self.running = self.ambient
+        self.running = False
+        self._wake()
 
     def recolor(self, color: str) -> None:
         self.color = color
-        self._draw()
+        self.itemconfigure(self.i_fill, fill=mix(self.track, color, 0.65))
+        self.itemconfigure(self.i_head, fill=color)
+        self._sweep_colors()
+
+    def _wake(self) -> None:
+        if self._job is None and alive(self):
+            self._job = self.after(FPS_MS, self._tick)
 
     def _tick(self) -> None:
+        self._job = None
         if not alive(self):
             return
-        mapped = self.winfo_ismapped()
-        moving = self.running or abs(self.target - self.value) > 0.002
-        if mapped and moving:
-            self.value += (self.target - self.value) * 0.16
-            if self.running:
-                self.pos = (self.pos + (0.006 if self.ambient else 0.014)) % 1.6
-            self._draw()
-        self.after(FPS_MS if mapped and moving else 250, self._tick)
-
-    def _draw(self) -> None:
-        self.delete("all")
-        w, h = self.winfo_width(), self.winfo_height()
-        if w < 4:
+        moving = abs(self.target - self.value) > 0.002
+        sweeping = self.running and MOTION
+        if not (moving or sweeping):
+            self.value = self.target
+            self._paint()
+            return  # nothing to animate: the timer stops until set()/start()
+        if not self.winfo_ismapped():
+            self._job = self.after(400, self._tick)  # off screen: check back rarely
             return
-        track = mix(self.bgc, self.track, 0.35) if self.ambient else self.track
-        self.create_rectangle(0, 0, w, h, fill=track, width=0)
+        self.value += (self.target - self.value) * 0.2
+        if sweeping:
+            self.pos = (self.pos + 0.02) % 1.5
+        self._paint()
+        self._job = self.after(FPS_MS, self._tick)
+
+    def _paint(self) -> None:
+        w, h = self.winfo_width(), self.h
         fw = w * self.value
-        if fw >= 1:
-            self.create_rectangle(0, 0, fw, h, fill=mix(self.track, self.color, 0.65), width=0)
-            self.create_rectangle(max(0, fw - 3), 0, fw, h, fill=self.color, width=0)
-        if self.running:
-            peak = 0.35 if self.ambient else 1.0
-            center = (self.pos - 0.3) * w
-            span = w * (0.18 if self.ambient else 0.22)
-            n = 14
-            for i in range(n):
-                x0 = center - span / 2 + span * i / n
-                x1 = x0 + span / n + 1
-                a = (1 - abs(i - n / 2) / (n / 2)) * peak
-                lit = x0 < fw  # over the filled part the sweep goes white-hot, elsewhere it's the accent
-                self.create_rectangle(x0, 0, x1, h, width=0, fill=mix(
-                    mix(self.track, self.color, 0.65) if lit else track, "#ffffff" if lit else self.color, a))
-        # segment notches give it the instrument look
-        if not self.ambient and h >= 5:
-            for i in range(1, 40):
-                x = w * i / 40
-                self.create_line(x, 0, x, h, fill=self.bgc)
+        self.coords(self.i_fill, 0, 0, fw, h)
+        self.coords(self.i_head, max(0, fw - 3), 0, fw if fw >= 1 else 0, h)
+        if self.running and MOTION:
+            span = w * 0.16
+            x = (self.pos - 0.25) * w
+            for i, it in enumerate(self.i_sweep):
+                x0 = x + span * i / self.N
+                self.coords(it, x0, 0, x0 + span / self.N + 1, h)
+        else:
+            for it in self.i_sweep:
+                self.coords(it, -10, 0, -10, h)
 
 
 # ---- arc reactor spinner ------------------------------------------------------
-MODES = {  # colour, degrees per frame
-    "idle": (GLOW, 0.5),
-    "busy": (GLOW, 3.6),
-    "ok": (GREEN, 0.8),
-    "bad": (RED, 1.2),
-    "warn": (GOLD, 1.2),
+MODES = {  # colour, degrees per frame (0 = holds still: no timer runs at all)
+    "idle": (GLOW, 0),
+    "busy": (GLOW, 4.5),
+    "ok": (GREEN, 0),
+    "bad": (RED, 0),
+    "warn": (GOLD, 0),
 }
 
 
 class Reactor(tk.Canvas):
-    """Concentric rotating rings with a pulsing core and a status readout in the middle."""
+    """Concentric rings with a status readout in the middle. The rings spin and the core pulses only
+    while work is running; otherwise it is a still picture and costs nothing."""
 
     def __init__(self, master, size: int = 220, bg: str = BG, **kw):
         super().__init__(master, width=size, height=size, bg=bg, highlightthickness=0, bd=0, **kw)
@@ -265,8 +314,9 @@ class Reactor(tk.Canvas):
         self.core = [self.create_oval(0, 0, 0, 0, width=0) for _ in range(3)]
         self.label = self.create_text(c, c - 6, text="READY", font=(DISPLAY_FONT, max(10, int(size / 14)), "bold"))
         self.sub = self.create_text(c, c + size / 12, text="", font=(BODY_FONT, max(8, int(size / 24))))
+        self._job = None
         self.set_mode("idle")
-        self.after(FPS_MS, self._tick)
+        self._draw()
 
     def set_mode(self, mode: str, label: str | None = None, sub: str | None = None) -> None:
         self.mode = mode
@@ -277,6 +327,8 @@ class Reactor(tk.Canvas):
             self.itemconfigure(self.label, text=label)
         if sub is not None:
             self.itemconfigure(self.sub, text=sub)
+        if self.speed and MOTION and self._job is None:
+            self._job = self.after(FPS_MS, self._tick)
 
     def set_text(self, label: str | None = None, sub: str | None = None) -> None:
         if label is not None:
@@ -291,38 +343,42 @@ class Reactor(tk.Canvas):
         for a in self.arcs2:
             self.itemconfigure(a, outline=mix(self.bgc, color, 0.55))
         self.itemconfigure(self.inner, outline=mix(self.bgc, color, 0.4))
+        for i, ln in enumerate(self.ticks):
+            self.itemconfigure(ln, fill=mix(BORDER, color, 0.7 if i % 4 == 0 else 0.3))
+        for i, o in enumerate(self.core):
+            self.itemconfigure(o, fill=mix(self.bgc, color, 0.07 + 0.07 * i))
         self.itemconfigure(self.label, fill=mix(color, "#ffffff", 0.35))
         self.itemconfigure(self.sub, fill=MUTED)
 
     def _tick(self) -> None:
-        if not alive(self):
+        self._job = None
+        if not alive(self) or not self.speed or not MOTION:
             return
         if self.winfo_ismapped():
             self.angle = (self.angle + self.speed) % 360
             self._draw()
-            self.after(FPS_MS, self._tick)
+            self._job = self.after(FPS_MS, self._tick)
         else:
-            self.after(300, self._tick)
+            self._job = self.after(500, self._tick)
 
     def _draw(self) -> None:
         c, a = self.c, self.angle
-        for i, ln in enumerate(self.ticks):
-            ang = math.radians(i * 7.5 - a * 0.4)
-            r0 = self.r_ticks - (6 if i % 4 == 0 else 2)
-            self.coords(ln, c + r0 * math.cos(ang), c + r0 * math.sin(ang),
-                        c + self.r_ticks * math.cos(ang), c + self.r_ticks * math.sin(ang))
-            lit = 0.5 + 0.5 * math.cos(ang * 1 + a * 0.05)  # a soft highlight travels round
-            self.itemconfigure(ln, fill=mix(BORDER, self.color, 0.25 + 0.6 * lit if i % 4 == 0 else 0.15 + 0.35 * lit))
+        if not getattr(self, "_ticks_drawn", False):  # tick ring is static: placed once
+            self._ticks_drawn = True
+            for i, ln in enumerate(self.ticks):
+                ang = math.radians(i * 7.5)
+                r0 = self.r_ticks - (6 if i % 4 == 0 else 2)
+                self.coords(ln, c + r0 * math.cos(ang), c + r0 * math.sin(ang),
+                            c + self.r_ticks * math.cos(ang), c + self.r_ticks * math.sin(ang))
         for i, arc in enumerate(self.arcs1):
             self.itemconfigure(arc, start=a + i * 120)
         for i, arc in enumerate(self.arcs2):
             self.itemconfigure(arc, start=-a * 1.6 + i * 90)
-        pulse = 0.5 + 0.5 * math.sin((time.time() - self.t0) * (5 if self.mode == "busy" else 2))
+        pulse = 0.5 + 0.5 * math.sin((time.time() - self.t0) * 5) if self.speed else 0.5
         base = c * 0.36
         for i, o in enumerate(self.core):
             r = base * (1 - i * 0.12) + pulse * 2
             self.coords(o, c - r, c - r, c + r, c + r)
-            self.itemconfigure(o, fill=mix(self.bgc, self.color, 0.05 + 0.07 * i + 0.05 * pulse))
 
 
 # ---- typing console -----------------------------------------------------------
@@ -387,7 +443,7 @@ class HudLog(ctk.CTkTextbox):
             self.insert("end", stamp, "time")
             self.pending[0] = ("", text, kind)
         backlog = sum(len(t) for _s, t, _k in self.pending)
-        n = max(3, backlog // 25)
+        n = max(6, backlog // 15) if MOTION else len(text)
         chunk, rest = text[:n], text[n:]
         self.insert("end", chunk, kind)
         if rest:
@@ -397,4 +453,4 @@ class HudLog(ctk.CTkTextbox):
             self.pending.pop(0)
         self.see("end")
         self.configure(state="disabled")
-        self.after(14, self._type)
+        self.after(30, self._type)
